@@ -20,7 +20,7 @@ Frontend ◀──2초 폴링── Backend ◀── ③ DynamoDB devoops-job-p
 multipart 필드: `job`(job.yaml), `train`(train.py), `data`(1개 이상)
 
 1. 입력을 먼저 검증한다. 세 필드가 모두 있어야 하고, `job.yaml`은 `jobset.x-k8s.io/v1alpha2 JobSet`이어야 한다. 잘못되면 업로드 전에 400을 반환한다.
-2. 작업 ID(8자리 hex)를 만들고 S3에 올린다. 키는 `code/<id>/train.py`와 `datasets/<id>/<파일명>`이다. 파일명은 base name만 써서 경로 탈출을 막는다.
+2. 작업 ID(8자리 hex)를 만들고 S3에 올린다. 키는 `code/<id>/job.yaml`(제출한 원본), `code/<id>/train.py`, `datasets/<id>/<파일명>`이다. 파일명은 base name만 써서 경로 탈출을 막는다.
 3. `internal/jobspec`이 JobSet을 인프라 규칙에 맞게 고친 뒤 k3s의 `training` namespace에 만든다.
 4. S3나 k3s 오류는 502로 반환한다. 업로드가 실패하면 JobSet은 만들지 않는다.
 
@@ -55,7 +55,15 @@ multipart 필드: `job`(job.yaml), `train`(train.py), `data`(1개 이상)
   - DynamoDB 조회가 실패해도 큐 상태는 그대로 반환한다(`progress: null`).
 - 결과는 최신순으로 정렬한다.
 
-### 3. 기타
+### 3. 제출 파일 보기 `GET /api/jobs/{id}/files`, `GET /api/jobs/{id}/files/{kind}/{name}`
+
+- 목록: 그 작업의 `code/<id>/`(job.yaml·train.py)와 `datasets/<id>/` 파일. `[{kind: "code"|"data", name, size}]` 형태이고 code가 먼저 온다.
+- 내용: `text/plain`으로 앞 **64KiB**만 준다. 데이터셋은 GB 단위일 수 있어서 S3 본문을 끝까지 받지 않고 끊는다.
+  - 헤더 `X-Truncated`(잘렸는지), `X-Total-Size`(전체 크기). CORS `Expose-Headers`로 브라우저에서 읽을 수 있다.
+- `kind`는 `code`·`data`만 받는다. 체크포인트(바이너리)는 보여주지 않는다. 작업 ID·파일명을 검사해서 다른 작업 파일이나 다른 경로는 읽을 수 없다.
+- 이 기능 전에 제출한 작업은 job.yaml을 저장하지 않았으므로 목록에 train.py와 데이터만 나온다.
+
+### 4. 기타
 
 - `GET /healthz`
 - CORS: `ALLOWED_ORIGIN` 한 곳만 허용
@@ -69,7 +77,7 @@ internal/jobspec/  JobSet 검증·주입 (순수 로직)
 internal/api/      HTTP 핸들러. S3·k8s·DynamoDB는 인터페이스로 받는다
 internal/kube/     k3s dynamic client: JobSet 생성, JobSet + Workload → 상태
 internal/store/    S3 업로드(multipart uploader), DynamoDB 진행 상태 조회
-examples/          job.yaml(단일 GPU JobSet), train.py(예시 학습 코드)
+examples/          job.yaml(단일 GPU JobSet), train.py(예시 학습 코드), make_data.py(예시 학습 데이터 생성)
 ```
 
 ## 예시 작업 (`examples/`)
@@ -81,6 +89,24 @@ examples/          job.yaml(단일 GPU JobSet), train.py(예시 학습 코드)
   - 최근 체크포인트 2개만 남긴다.
   - 시작할 때 `/ckpt`의 최신 체크포인트에서 재개한다.
   - 매 step DynamoDB에 진행 상태를 덮어쓴다. DynamoDB 오류가 나도 학습은 멈추지 않는다.
+
+### 학습 데이터 (`make_data.py` → `train.csv`)
+
+지금까지 제출한 예시 작업이 쓴 데이터다. 실제 데이터가 아니라 **합성 선형 회귀 데이터**이고, 인프라(배치·복구·체크포인트·진행 상태)를 확인하는 용도다.
+
+| 항목 | 값 |
+|---|---|
+| 형식 | CSV, 헤더 없음, 5000행 × 9열, 약 380KB |
+| 입력 (앞 8열) | x1..x8, 각각 표준정규분포 N(0, 1)에서 뽑은 값 (소수 5자리) |
+| 레이블 (마지막 열) | y = w·x + ε. w는 seed 0으로 고정한 가중치 8개 `[0.942, -1.397, -0.680, 0.371, -1.016, -0.072, 0.179, -0.831]`, 노이즈 ε ~ N(0, 0.1²) |
+| 모델 | `train.py`의 MLP(8 → 256 → ReLU → 1), MSE loss, Adam(lr 1e-3), batch 256 |
+| 기대 결과 | 노이즈 분산이 0.01이라 loss가 약 0.01 근처까지 내려간다. 2026-10-27 실행에서 5000 step 후 loss는 0.0069였다 |
+
+```sh
+python examples/make_data.py train.csv   # 표준 라이브러리만 사용. 같은 seed라 항상 같은 파일이 나온다
+```
+
+`train.py`는 `$DATA_DIR`의 `*.csv`를 모두 읽어 마지막 열을 레이블로 쓴다. CSV가 없으면 32차원 합성 데이터를 직접 만든다. 따라서 다른 데이터를 쓰려면 같은 형식(숫자 열, 마지막 열이 레이블)의 CSV를 올리면 된다.
 
 ## 설정 (환경변수)
 
@@ -107,9 +133,9 @@ go vet ./...
 ```
 
 - `jobspec`: 주입하는 각 값, 사용자 값 유지, 잘못된 입력 거부, `examples/job.yaml`이 통과하는지
-- `api`: 업로드 키, 입력 검증 순서(검증이 먼저고 업로드가 나중), 경로 탈출 차단, 502 처리, 진행 상태 병합·정렬, DynamoDB 실패 시 동작, 404, CORS
+- `api`: 업로드 키(job.yaml 원본 포함), 입력 검증 순서(검증이 먼저고 업로드가 나중), 경로 탈출 차단, 502 처리, 진행 상태 병합·정렬, DynamoDB 실패 시 동작, 404, CORS, 파일 목록·내용·64KiB 자르기·다른 작업 파일 차단
 - `kube`: Workload와 JobSet 상태 → phase·cluster·restarts·message, 백엔드가 만들지 않은 JobSet은 제외, 생성
-- `store`: DynamoDB 항목 디코딩, 100개 단위 분할
+- `store`: DynamoDB 항목 디코딩, 100개 단위 분할, S3 목록 페이지 넘김, 앞부분만 읽기, 없는 키 → 404
 
 ## 로컬 Docker 실행
 

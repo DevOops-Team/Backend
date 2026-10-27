@@ -9,6 +9,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +50,35 @@ func (f *fakeObjects) Put(_ context.Context, key string, body io.Reader) error {
 	}
 	f.puts[key] = string(b)
 	return nil
+}
+
+func (f *fakeObjects) List(_ context.Context, prefix string) ([]ObjectInfo, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	var out []ObjectInfo
+	for k, v := range f.puts {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, ObjectInfo{Key: k, Size: int64(len(v))})
+		}
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Key < out[b].Key })
+	return out, nil
+}
+
+func (f *fakeObjects) Get(_ context.Context, key string, limit int64) ([]byte, int64, error) {
+	if f.err != nil {
+		return nil, 0, f.err
+	}
+	v, ok := f.puts[key]
+	if !ok {
+		return nil, 0, ErrNotFound
+	}
+	b := []byte(v)
+	if int64(len(b)) > limit {
+		b = b[:limit]
+	}
+	return b, int64(len(v)), nil
 }
 
 type fakeScheduler struct {
@@ -140,6 +171,18 @@ func TestCreateJobUploadsCodeAndDataUnderJobID(t *testing.T) {
 	}
 	if objects.puts["datasets/abc123/train.csv"] != "1,2,3" {
 		t.Errorf("data not uploaded to datasets/abc123/: %v", objects.puts)
+	}
+}
+
+func TestCreateJobKeepsSubmittedJobYAMLNextToCode(t *testing.T) {
+	objects := &fakeObjects{}
+	srv := newTestServer(objects, &fakeScheduler{}, &fakeProgress{})
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, validUpload(t))
+
+	if objects.puts["code/abc123/job.yaml"] != validJobSet {
+		t.Errorf("job.yaml as submitted not stored at code/abc123/job.yaml: %v", objects.puts)
 	}
 }
 
@@ -366,6 +409,114 @@ func TestGetJobReturns404ForUnknownID(t *testing.T) {
 	}
 }
 
+// --- GET /api/jobs/{id}/files ----------------------------------------------
+
+func storedJob() *fakeObjects {
+	return &fakeObjects{puts: map[string]string{
+		"code/abc123/job.yaml":      validJobSet,
+		"code/abc123/train.py":      "print('hi')",
+		"datasets/abc123/train.csv": "1,2,3",
+		"code/other/train.py":       "not this job",
+	}}
+}
+
+func TestListFilesReturnsCodeAndDataOfOneJob(t *testing.T) {
+	srv := newTestServer(storedJob(), &fakeScheduler{}, &fakeProgress{})
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs/abc123/files", nil))
+
+	var files []File
+	json.Unmarshal(rec.Body.Bytes(), &files)
+	want := []File{
+		{Kind: "code", Name: "job.yaml", Size: int64(len(validJobSet))},
+		{Kind: "code", Name: "train.py", Size: 11},
+		{Kind: "data", Name: "train.csv", Size: 5},
+	}
+	if rec.Code != http.StatusOK || len(files) != len(want) {
+		t.Fatalf("status = %d files = %+v, want %+v", rec.Code, files, want)
+	}
+	for i := range want {
+		if files[i] != want[i] {
+			t.Errorf("files[%d] = %+v, want %+v", i, files[i], want[i])
+		}
+	}
+}
+
+func TestGetFileReturnsContentAsText(t *testing.T) {
+	srv := newTestServer(storedJob(), &fakeScheduler{}, &fakeProgress{})
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs/abc123/files/code/train.py", nil))
+
+	if rec.Code != http.StatusOK || rec.Body.String() != "print('hi')" {
+		t.Errorf("status = %d body = %q", rec.Code, rec.Body)
+	}
+	if !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") {
+		t.Errorf("content-type = %q, want text/plain", rec.Header().Get("Content-Type"))
+	}
+	if rec.Header().Get("X-Truncated") != "false" {
+		t.Errorf("X-Truncated = %q, want false", rec.Header().Get("X-Truncated"))
+	}
+}
+
+func TestGetFileTruncatesLargeDatasets(t *testing.T) {
+	big := strings.Repeat("1,2,3\n", 20000) // 120000 bytes
+	objects := &fakeObjects{puts: map[string]string{"datasets/abc123/big.csv": big}}
+	srv := newTestServer(objects, &fakeScheduler{}, &fakeProgress{})
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs/abc123/files/data/big.csv", nil))
+
+	if rec.Code != http.StatusOK || rec.Body.Len() != maxPreviewBytes {
+		t.Errorf("status = %d len = %d, want %d bytes", rec.Code, rec.Body.Len(), maxPreviewBytes)
+	}
+	if rec.Header().Get("X-Truncated") != "true" || rec.Header().Get("X-Total-Size") != "120000" {
+		t.Errorf("X-Truncated = %q X-Total-Size = %q", rec.Header().Get("X-Truncated"), rec.Header().Get("X-Total-Size"))
+	}
+}
+
+func TestGetFileRejectsKindsOtherThanCodeAndData(t *testing.T) {
+	objects := storedJob()
+	objects.puts["checkpoints/abc123/ckpt-1000.pt"] = "weights"
+	srv := newTestServer(objects, &fakeScheduler{}, &fakeProgress{})
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs/abc123/files/checkpoints/ckpt-1000.pt", nil))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestGetFileNeverServesAnotherJobsFiles(t *testing.T) {
+	srv := newTestServer(storedJob(), &fakeScheduler{}, &fakeProgress{})
+
+	for _, path := range []string{
+		"/api/jobs/abc123/files/code/..%2F..%2Fcode%2Fother%2Ftrain.py",
+		"/api/jobs/..%2Fother/files/code/train.py",
+		"/api/jobs/abc123/files/code/%2E%2E",
+	} {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+		if rec.Code == http.StatusOK || strings.Contains(rec.Body.String(), "not this job") {
+			t.Errorf("%s: status = %d body = %q, want rejection", path, rec.Code, rec.Body)
+		}
+	}
+}
+
+func TestGetFileReturns404ForMissingFile(t *testing.T) {
+	srv := newTestServer(storedJob(), &fakeScheduler{}, &fakeProgress{})
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs/abc123/files/data/missing.csv", nil))
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
 // --- misc ------------------------------------------------------------------
 
 func TestHealthz(t *testing.T) {
@@ -392,5 +543,18 @@ func TestCORSPreflightAllowsFrontendOrigin(t *testing.T) {
 	}
 	if rec.Header().Get("Access-Control-Allow-Origin") != "http://localhost:5173" {
 		t.Errorf("allow-origin = %q", rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestCORSExposesPreviewHeadersToFrontend(t *testing.T) {
+	srv := newTestServer(storedJob(), &fakeScheduler{}, &fakeProgress{})
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/abc123/files/code/train.py", nil)
+	req.Header.Set("Origin", "http://localhost:5173")
+
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(got, "X-Truncated") || !strings.Contains(got, "X-Total-Size") {
+		t.Errorf("expose-headers = %q, browser cannot read truncation headers", got)
 	}
 }

@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,7 +11,9 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +25,17 @@ import (
 // ObjectStore stores uploaded job inputs (S3).
 type ObjectStore interface {
 	Put(ctx context.Context, key string, body io.Reader) error
+	List(ctx context.Context, prefix string) ([]ObjectInfo, error)
+	// Get returns at most limit bytes of the object and its full size.
+	Get(ctx context.Context, key string, limit int64) ([]byte, int64, error)
+}
+
+// ErrNotFound is returned by ObjectStore.Get when the key does not exist.
+var ErrNotFound = errors.New("object not found")
+
+type ObjectInfo struct {
+	Key  string
+	Size int64
 }
 
 // Scheduler submits JobSets to the management cluster and reads their queue state (k3s + Kueue).
@@ -74,6 +88,21 @@ type Job struct {
 	Progress *Progress `json:"progress"`
 }
 
+// File is one stored input of a job: code (job.yaml, train.py) or data.
+type File struct {
+	Kind string `json:"kind"` // "code" | "data"
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
+// fileKinds maps a File.Kind to its S3 prefix. Checkpoints are binary and stay out of the viewer.
+var fileKinds = map[string]string{"code": "code/", "data": "datasets/"}
+
+// maxPreviewBytes caps how much of one file the viewer gets; datasets can be GBs.
+const maxPreviewBytes = 64 << 10
+
+var validJobID = regexp.MustCompile(`^[0-9a-z]+$`)
+
 type Config struct {
 	Namespace     string
 	QueueName     string
@@ -100,6 +129,8 @@ func NewServer(cfg Config, objects ObjectStore, sched Scheduler, progress Progre
 	mux.HandleFunc("POST /api/jobs", s.createJob)
 	mux.HandleFunc("GET /api/jobs", s.listJobs)
 	mux.HandleFunc("GET /api/jobs/{id}", s.getJob)
+	mux.HandleFunc("GET /api/jobs/{id}/files", s.listFiles)
+	mux.HandleFunc("GET /api/jobs/{id}/files/{kind}/{name}", s.getFile)
 	return s.cors(mux)
 }
 
@@ -109,6 +140,7 @@ func (s *server) cors(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Truncated, X-Total-Size")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -159,6 +191,11 @@ func (s *server) createJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Inputs must be in S3 before the JobSet exists: the pods mount code/<id> and datasets/<id>.
+	// job.yaml is kept as submitted so the frontend can show it.
+	if err := s.objects.Put(r.Context(), "code/"+id+"/job.yaml", bytes.NewReader(manifest)); err != nil {
+		s.badGateway(w, "upload job.yaml", err)
+		return
+	}
 	if err := s.upload(r.Context(), "code/"+id+"/train.py", trainFile); err != nil {
 		s.badGateway(w, "upload train.py", err)
 		return
@@ -206,6 +243,52 @@ func (s *server) getJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeError(w, http.StatusNotFound, "job not found")
+}
+
+// listFiles returns the job's code and data files, code first.
+func (s *server) listFiles(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !validJobID.MatchString(id) {
+		writeError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	files := []File{}
+	for _, kind := range []string{"code", "data"} {
+		prefix := fileKinds[kind] + id + "/"
+		objs, err := s.objects.List(r.Context(), prefix)
+		if err != nil {
+			s.badGateway(w, "list files", err)
+			return
+		}
+		for _, o := range objs {
+			files = append(files, File{Kind: kind, Name: strings.TrimPrefix(o.Key, prefix), Size: o.Size})
+		}
+	}
+	writeJSON(w, http.StatusOK, files)
+}
+
+// getFile returns the first maxPreviewBytes of one file as text.
+// X-Truncated and X-Total-Size tell the viewer when it is not the whole file.
+func (s *server) getFile(w http.ResponseWriter, r *http.Request) {
+	id, kind, name := r.PathValue("id"), r.PathValue("kind"), r.PathValue("name")
+	prefix, ok := fileKinds[kind]
+	if !ok || !validJobID.MatchString(id) || name == "" || safeName(name) != name {
+		writeError(w, http.StatusBadRequest, "invalid file path")
+		return
+	}
+	data, size, err := s.objects.Get(r.Context(), prefix+id+"/"+name, maxPreviewBytes)
+	if errors.Is(err, ErrNotFound) {
+		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	if err != nil {
+		s.badGateway(w, "get file", err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Truncated", strconv.FormatBool(int64(len(data)) < size))
+	w.Header().Set("X-Total-Size", strconv.FormatInt(size, 10))
+	w.Write(data)
 }
 
 // jobs returns queue state merged with progress, newest first.
