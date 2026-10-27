@@ -33,10 +33,12 @@ func main() {
 }
 
 func run() error {
+	region := env("AWS_REGION", "us-east-1")
 	cfg := api.Config{
 		Namespace:     env("TRAINING_NAMESPACE", "training"),
 		QueueName:     env("QUEUE_NAME", "queue-auto"),
 		ProgressTable: env("PROGRESS_TABLE", "devoops-job-progress"),
+		Region:        region,
 		AllowedOrigin: env("ALLOWED_ORIGIN", "http://localhost:5173"),
 		NewID:         newID,
 	}
@@ -45,7 +47,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(env("AWS_REGION", "us-east-1")))
+	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
 	if err != nil {
 		return err
 	}

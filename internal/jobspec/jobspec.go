@@ -37,6 +37,7 @@ type Options struct {
 	Namespace     string
 	QueueName     string
 	ProgressTable string
+	Region        string
 }
 
 // s3Volumes maps the PVC prepared by infra (40-addons) to its mount path.
@@ -159,12 +160,15 @@ func preparePodTemplate(job map[string]any, o Options) error {
 			mounts = append(mounts, map[string]any{"name": v.claim, "mountPath": v.mountPath, "subPath": o.JobID})
 		}
 		cm["volumeMounts"] = mounts
-		cm["env"] = append(slice(cm["env"]),
+		cm["env"] = setEnv(slice(cm["env"]),
 			env("JOB_ID", o.JobID),
 			env("PROGRESS_TABLE", o.ProgressTable),
 			env("CODE_DIR", "/code"),
 			env("DATA_DIR", "/data"),
 			env("CKPT_DIR", "/ckpt"),
+			// boto3(botocore)는 AWS_DEFAULT_REGION만 읽으므로 둘 다 넣는다.
+			env("AWS_REGION", o.Region),
+			env("AWS_DEFAULT_REGION", o.Region),
 		)
 		containers[i] = cm
 	}
@@ -182,6 +186,26 @@ func addRequiredTerm(affinity map[string]any, kind string, term map[string]any) 
 	const key = "requiredDuringSchedulingIgnoredDuringExecution"
 	a[key] = append(slice(a[key]), term)
 	affinity[kind] = a
+}
+
+// setEnv adds vars, replacing user entries with the same name: Kubernetes rejects duplicate env names,
+// and these values must match the infra (paths, table, region of the bucket and table).
+func setEnv(current []any, vars ...map[string]any) []any {
+	override := map[string]bool{}
+	for _, v := range vars {
+		override[v["name"].(string)] = true
+	}
+	out := make([]any, 0, len(current)+len(vars))
+	for _, e := range current {
+		if em, ok := e.(map[string]any); ok && override[fmt.Sprint(em["name"])] {
+			continue
+		}
+		out = append(out, e)
+	}
+	for _, v := range vars {
+		out = append(out, v)
+	}
+	return out
 }
 
 func env(name, value string) map[string]any {

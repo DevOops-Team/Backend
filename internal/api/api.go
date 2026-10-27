@@ -78,6 +78,7 @@ type Config struct {
 	Namespace     string
 	QueueName     string
 	ProgressTable string
+	Region        string
 	AllowedOrigin string
 	NewID         func() string
 }
@@ -150,6 +151,7 @@ func (s *server) createJob(w http.ResponseWriter, r *http.Request) {
 		Namespace:     s.cfg.Namespace,
 		QueueName:     s.cfg.QueueName,
 		ProgressTable: s.cfg.ProgressTable,
+		Region:        s.cfg.Region,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

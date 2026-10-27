@@ -37,6 +37,7 @@ func testOptions() Options {
 		Namespace:     "training",
 		QueueName:     "queue-auto",
 		ProgressTable: "devoops-job-progress",
+		Region:        "us-east-1",
 	}
 }
 
@@ -248,6 +249,9 @@ func TestPrepareInjectsRuntimeEnv(t *testing.T) {
 		"CODE_DIR":       "/code",
 		"DATA_DIR":       "/data",
 		"CKPT_DIR":       "/ckpt",
+		// boto3(botocore)는 AWS_DEFAULT_REGION만 읽는다. 없으면 DynamoDB 클라이언트 생성이 NoRegionError로 실패한다.
+		"AWS_REGION":         "us-east-1",
+		"AWS_DEFAULT_REGION": "us-east-1",
 	}
 	for k, v := range want {
 		if env[k] != v {
@@ -272,5 +276,32 @@ func TestPrepareKeepsUserEnv(t *testing.T) {
 	}
 	if !found {
 		t.Error("user env LR was dropped")
+	}
+}
+
+func TestPrepareDoesNotDuplicateEnvTheUserAlreadySet(t *testing.T) {
+	manifest := twoWorkerJobSet + "              env:\n              - name: AWS_REGION\n                value: eu-west-1\n"
+
+	js, err := Prepare([]byte(manifest), testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	count := map[string]int{}
+	var region string
+	for _, e := range container(t, js)["env"].([]any) {
+		ee := e.(map[string]any)
+		count[ee["name"].(string)]++
+		if ee["name"] == "AWS_REGION" {
+			region, _ = ee["value"].(string)
+		}
+	}
+	for name, n := range count {
+		if n > 1 {
+			t.Errorf("env %s appears %d times; Kubernetes rejects duplicate env names", name, n)
+		}
+	}
+	if region != "us-east-1" {
+		t.Errorf("AWS_REGION = %q, want backend value us-east-1 (resources live there)", region)
 	}
 }

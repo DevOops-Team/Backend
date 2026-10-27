@@ -75,7 +75,14 @@ class ProgressWriter:
     """DynamoDB 오류는 학습을 멈추지 않는다."""
 
     def __init__(self):
-        self.table = boto3.resource("dynamodb").Table(TABLE) if TABLE else None
+        self.table = None
+        if not TABLE:
+            return
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        try:
+            self.table = boto3.resource("dynamodb", region_name=region).Table(TABLE)
+        except Exception as e:  # noqa: BLE001
+            print(f"progress disabled: {e}", flush=True)
 
     def write(self, **fields):
         if not self.table:
