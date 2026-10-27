@@ -29,7 +29,7 @@ multipart 필드: `job`(job.yaml), `train`(train.py), `data`(1개 이상)
 | 대상 | 넣는 값 | 이유 |
 |---|---|---|
 | JobSet | 이름 `job-<id>`, namespace `training` | 작업마다 고유 이름 |
-| JobSet 라벨 | `kueue.x-k8s.io/queue-name: queue-auto`, `devoops/job-id: <id>` | MultiKueue 큐로 들어가 두 EKS 중 먼저 승인한 곳으로 간다 |
+| JobSet 라벨 | `kueue.x-k8s.io/queue-name: queue-auto`, `devoops/job-id: <id>` | MultiKueue 큐로 들어가 먼저 승인한 EKS로 간다. 현재 GPU는 `devoops-a`에만 있어서 사실상 항상 A로 간다 |
 | `spec.failurePolicy.maxRestarts` | 없으면 3 | GPU 노드가 사라지면 JobSet 전체가 다시 떠서 standby 노드로 옮겨진다 |
 | Pod 라벨 | `devoops/gpu-group: train` | standby placeholder와 같은 그룹 |
 | Pod affinity | 같은 그룹과 **같은 zone**(required, `namespaceSelector: {}`) | 학습 2대 + standby 1대를 한 AZ에 모은다. placeholder는 `gpu-standby` namespace에 있어서 모든 namespace를 본다 |
