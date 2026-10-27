@@ -1,11 +1,11 @@
-"""2-GPU DDP 예시 학습 스크립트.
+"""단일 GPU 예시 학습 스크립트.
 
 규칙 (인프라가 기대하는 것):
   - S3 코드를 갖지 않는다. 경로만 쓴다: 코드 $CODE_DIR, 데이터 $DATA_DIR, 체크포인트 $CKPT_DIR.
     세 경로는 Mountpoint for S3로 마운트된 작업 전용 디렉터리다.
   - 체크포인트는 새 파일을 처음부터 끝까지 한 번에 쓴다. Mountpoint는 rename·append를 지원하지 않으므로
     임시 파일 후 rename 방식은 쓰지 않는다. 시작 시 가장 최근 체크포인트에서 재개한다.
-  - rank 0이 매 step DynamoDB($PROGRESS_TABLE, PK job_id)에 진행 상태를 덮어쓴다.
+  - 매 step DynamoDB($PROGRESS_TABLE, PK job_id)에 진행 상태를 덮어쓴다.
 """
 
 import argparse
@@ -19,9 +19,7 @@ from decimal import Decimal
 import boto3
 import numpy as np
 import torch
-import torch.distributed as dist
 import torch.nn as nn
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 JOB_ID = os.environ["JOB_ID"]
 CKPT_DIR = os.environ.get("CKPT_DIR", "/ckpt")
@@ -64,7 +62,7 @@ def latest_checkpoint():
 def save_checkpoint(step, model, opt):
     # 메모리에 직렬화한 뒤 새 파일에 순차로 한 번에 쓴다 (Mountpoint 규칙).
     buf = io.BytesIO()
-    torch.save({"step": step, "model": model.module.state_dict(), "opt": opt.state_dict()}, buf)
+    torch.save({"step": step, "model": model.state_dict(), "opt": opt.state_dict()}, buf)
     with open(os.path.join(CKPT_DIR, f"ckpt-{step}.pt"), "wb") as f:
         f.write(buf.getvalue())
     old = sorted(int(m.group(1)) for p in glob.glob(os.path.join(CKPT_DIR, "ckpt-*.pt"))
@@ -74,10 +72,10 @@ def save_checkpoint(step, model, opt):
 
 
 class ProgressWriter:
-    """rank 0만 쓴다. DynamoDB 오류는 학습을 멈추지 않는다."""
+    """DynamoDB 오류는 학습을 멈추지 않는다."""
 
-    def __init__(self, enabled):
-        self.table = boto3.resource("dynamodb").Table(TABLE) if enabled and TABLE else None
+    def __init__(self):
+        self.table = boto3.resource("dynamodb").Table(TABLE) if TABLE else None
 
     def write(self, **fields):
         if not self.table:
@@ -99,29 +97,25 @@ class ProgressWriter:
 
 def main():
     args = parse_args()
-    dist.init_process_group("nccl")
-    rank = dist.get_rank()
-    device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", 0)))
-    torch.cuda.set_device(device)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     x, y = load_data(device)
-    model = DDP(nn.Sequential(nn.Linear(x.shape[1], 256), nn.ReLU(), nn.Linear(256, 1)).to(device),
-                device_ids=[device.index])
+    model = nn.Sequential(nn.Linear(x.shape[1], 256), nn.ReLU(), nn.Linear(256, 1)).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     loss_fn = nn.MSELoss()
 
     start, path = latest_checkpoint()
     if path:
         state = torch.load(path, map_location=device)
-        model.module.load_state_dict(state["model"])
+        model.load_state_dict(state["model"])
         opt.load_state_dict(state["opt"])
-        print(f"[rank {rank}] resumed from {path} (step {start})", flush=True)
+        print(f"resumed from {path} (step {start})", flush=True)
 
-    progress = ProgressWriter(enabled=rank == 0)
+    progress = ProgressWriter()
     progress.write(status="RUNNING", step=start, total_steps=args.total_steps,
                    last_checkpoint_step=start, node_name=NODE)
 
-    g = torch.Generator(device=device).manual_seed(1000 + rank)
+    g = torch.Generator(device=device).manual_seed(1000 + start)
     try:
         for step in range(start + 1, args.total_steps + 1):
             idx = torch.randint(0, x.shape[0], (args.batch_size,), device=device, generator=g)
@@ -132,18 +126,14 @@ def main():
 
             fields = {"step": step, "loss": float(loss.item())}
             if step % args.ckpt_every == 0:
-                if rank == 0:
-                    save_checkpoint(step, model, opt)
-                    fields["last_checkpoint_step"] = step
-                dist.barrier()
+                save_checkpoint(step, model, opt)
+                fields["last_checkpoint_step"] = step
             progress.write(**fields)
 
         progress.write(status="COMPLETED")
     except Exception:
         progress.write(status="FAILED")
         raise
-    finally:
-        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

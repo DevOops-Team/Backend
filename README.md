@@ -9,7 +9,7 @@ Frontend ──multipart──▶ Backend ──① S3 업로드 (code/<id>/, da
                                                    │ 먼저 승인한 EKS로 전달
                                                    ▼
                                      EKS devoops-a / devoops-b (Kueue → Karpenter GPU 노드)
-                                                   │ train.py(rank 0)가 매 step 기록
+                                                   │ train.py가 매 step 기록
 Frontend ◀──2초 폴링── Backend ◀── ③ DynamoDB devoops-job-progress
 ```
 
@@ -32,7 +32,7 @@ multipart 필드: `job`(job.yaml), `train`(train.py), `data`(1개 이상)
 | JobSet 라벨 | `kueue.x-k8s.io/queue-name: queue-auto`, `devoops/job-id: <id>` | MultiKueue 큐로 들어가 먼저 승인한 EKS로 간다. 현재 GPU는 `devoops-a`에만 있어서 사실상 항상 A로 간다 |
 | `spec.failurePolicy.maxRestarts` | 없으면 3 | GPU 노드가 사라지면 JobSet 전체가 다시 떠서 standby 노드로 옮겨진다 |
 | Pod 라벨 | `devoops/gpu-group: train` | standby placeholder와 같은 그룹 |
-| Pod affinity | 같은 그룹과 **같은 zone**(required, `namespaceSelector: {}`) | 학습 2대 + standby 1대를 한 AZ에 모은다. placeholder는 `gpu-standby` namespace에 있어서 모든 namespace를 본다 |
+| Pod affinity | 같은 그룹과 **같은 zone**(required, `namespaceSelector: {}`) | 학습 노드와 standby 노드를 한 AZ에 모은다. placeholder는 `gpu-standby` namespace에 있어서 모든 namespace를 본다 |
 | Pod anti-affinity | 같은 그룹과 **다른 hostname** | GPU 노드 1대에 Pod 1개 |
 | toleration | `nvidia.com/gpu=true:NoSchedule` | Karpenter GPU 노드 taint. EKS는 이 toleration을 자동으로 붙이지 않는다 |
 | 볼륨 | PVC `s3-code`, `s3-datasets`, `s3-checkpoints`를 subPath `<id>`로 `/code`, `/data`, `/ckpt`에 마운트 | Mountpoint for S3. train.py에 S3 코드가 필요 없다 |
@@ -69,18 +69,18 @@ internal/jobspec/  JobSet 검증·주입 (순수 로직)
 internal/api/      HTTP 핸들러. S3·k8s·DynamoDB는 인터페이스로 받는다
 internal/kube/     k3s dynamic client: JobSet 생성, JobSet + Workload → 상태
 internal/store/    S3 업로드(multipart uploader), DynamoDB 진행 상태 조회
-examples/          job.yaml(2 GPU DDP JobSet), train.py(예시 학습 코드)
+examples/          job.yaml(단일 GPU JobSet), train.py(예시 학습 코드)
 ```
 
 ## 예시 작업 (`examples/`)
 
-- `job.yaml`: Indexed Job 2개 Pod × GPU 1개. `torchrun`으로 rank 0 Pod(`<jobset>-workers-0-0.<jobset>`)를 master로 쓴다.
+- `job.yaml`: Pod 1개 × GPU 1개(분산 학습 없음). `python $CODE_DIR/train.py`를 실행한다.
 - `train.py`가 지키는 규칙:
   - S3 코드가 없다. `/code`, `/data`, `/ckpt` 경로만 쓴다.
   - 체크포인트는 1000 step마다 `ckpt-<step>.pt`로 저장한다. **메모리에 직렬화한 뒤 새 파일에 한 번에** 쓴다. Mountpoint는 rename과 append를 지원하지 않기 때문이다.
   - 최근 체크포인트 2개만 남긴다.
   - 시작할 때 `/ckpt`의 최신 체크포인트에서 재개한다.
-  - rank 0이 매 step DynamoDB에 진행 상태를 덮어쓴다. DynamoDB 오류가 나도 학습은 멈추지 않는다.
+  - 매 step DynamoDB에 진행 상태를 덮어쓴다. DynamoDB 오류가 나도 학습은 멈추지 않는다.
 
 ## 설정 (환경변수)
 
