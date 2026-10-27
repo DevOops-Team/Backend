@@ -1,0 +1,53 @@
+# 2 GPU DDP 예시 (g4dn.xlarge 2대 × GPU 1개). 백엔드가 이름·namespace·큐 라벨·S3 볼륨·affinity·toleration을 채운다.
+# 여기에는 학습에 필요한 것만 쓴다.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: ddp-example # 백엔드가 job-<id>로 바꾼다
+spec:
+  failurePolicy:
+    maxRestarts: 3 # Pod 하나가 죽으면 JobSet 전체를 다시 띄운다 (생략하면 백엔드가 3을 넣는다)
+  replicatedJobs:
+  - name: workers
+    replicas: 1
+    template:
+      spec:
+        parallelism: 2
+        completions: 2
+        completionMode: Indexed
+        backoffLimit: 0
+        template:
+          spec:
+            restartPolicy: Never
+            containers:
+            - name: trainer
+              image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+              command: ["bash", "-c"]
+              args:
+              - |
+                pip install -q boto3 &&
+                torchrun \
+                  --nnodes=2 --nproc_per_node=1 \
+                  --node_rank="${JOB_COMPLETION_INDEX}" \
+                  --master_addr="${JOBSET_NAME}-workers-0-0.${JOBSET_NAME}" \
+                  --master_port=29500 \
+                  "${CODE_DIR}/train.py" --total-steps 5000 --ckpt-every 1000
+              env:
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/jobset-name']
+              - name: NODE_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: spec.nodeName
+              - name: AWS_REGION
+                value: us-east-1
+              resources:
+                requests:
+                  cpu: "3"
+                  memory: 12Gi
+                  nvidia.com/gpu: 1
+                limits:
+                  memory: 12Gi
+                  nvidia.com/gpu: 1
