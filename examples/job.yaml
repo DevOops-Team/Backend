@@ -1,19 +1,24 @@
-# 단일 GPU 예시 (g4dn.xlarge 1대 × GPU 1개). 백엔드가 이름·namespace·큐 라벨·S3 볼륨·affinity·toleration을 채운다.
+# DDP 예시 (g4dn.xlarge 2대 × GPU 1개, standby 없음). 백엔드가 이름·namespace·큐 라벨·S3 볼륨·affinity·toleration을 채운다.
 # 여기에는 학습에 필요한 것만 쓴다.
+#   - Pod 2개(index 0·1)를 하나의 Job으로 띄운다. Kueue는 GPU 2개를 한 번에 승인한다(gang).
+#   - JobSet이 headless Service(이름 = JobSet 이름)를 만들어 Pod마다 DNS를 준다.
+#     rank 0 주소: <jobset>-trainer-0-0.<jobset>
+#   - 백엔드 hostname anti-affinity로 노드당 Pod 1개, zone affinity로 두 노드가 같은 AZ에 뜬다.
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: single-gpu-example # 백엔드가 job-<id>로 바꾼다
+  name: ddp-example # 백엔드가 job-<id>로 바꾼다
 spec:
   failurePolicy:
-    maxRestarts: 3 # 노드를 잃으면 JobSet을 다시 띄워 standby 노드로 옮긴다 (생략하면 백엔드가 3을 넣는다)
+    maxRestarts: 3 # Pod 하나라도 실패하면 두 Pod를 같이 다시 띄우고 /ckpt에서 재개한다 (생략하면 백엔드가 3을 넣는다)
   replicatedJobs:
   - name: trainer
     replicas: 1
     template:
       spec:
-        parallelism: 1
-        completions: 1
+        parallelism: 2
+        completions: 2
+        completionMode: Indexed
         backoffLimit: 0
         template:
           spec:
@@ -23,12 +28,31 @@ spec:
               image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
               command: ["bash", "-c"]
               args:
-              - pip install -q boto3 && python "${CODE_DIR}/train.py" --total-steps 5000 --ckpt-every 1000
+              - |
+                set -e
+                pip install -q boto3
+                export MASTER_ADDR="${JOBSET_NAME}-trainer-0-0.${JOBSET_NAME}"
+                # rank 0 Pod의 DNS가 생길 때까지 기다린다 (두 Pod가 다른 노드에서 따로 뜬다).
+                until getent hosts "$MASTER_ADDR" >/dev/null; do echo "waiting for $MASTER_ADDR"; sleep 2; done
+                exec torchrun --nnodes=2 --nproc-per-node=1 --node-rank="$JOB_COMPLETION_INDEX" \
+                  --master-addr="$MASTER_ADDR" --master-port=29500 \
+                  "${CODE_DIR}/train.py" --total-steps 5000 --ckpt-every 1000
+              ports:
+              - containerPort: 29500
               env:
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/jobset-name']
               - name: NODE_NAME
                 valueFrom:
                   fieldRef:
                     fieldPath: spec.nodeName
+              # g4dn.xlarge는 EFA가 없다. 노드 간 NCCL은 Pod 네트워크(eth0) TCP로 한다.
+              - name: NCCL_SOCKET_IFNAME
+                value: eth0
+              - name: NCCL_IB_DISABLE
+                value: "1"
               resources:
                 requests:
                   cpu: "3"

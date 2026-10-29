@@ -33,7 +33,7 @@ func main() {
 }
 
 func run() error {
-	region := env("AWS_REGION", "us-east-1")
+	region := env("AWS_REGION", "us-east-2")
 	cfg := api.Config{
 		Namespace:     env("TRAINING_NAMESPACE", "training"),
 		QueueName:     env("QUEUE_NAME", "queue-auto"),

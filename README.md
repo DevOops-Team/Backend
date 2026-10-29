@@ -77,18 +77,24 @@ internal/jobspec/  JobSet 검증·주입 (순수 로직)
 internal/api/      HTTP 핸들러. S3·k8s·DynamoDB는 인터페이스로 받는다
 internal/kube/     k3s dynamic client: JobSet 생성, JobSet + Workload → 상태
 internal/store/    S3 업로드(multipart uploader), DynamoDB 진행 상태 조회
-examples/          job.yaml(단일 GPU JobSet), train.py(예시 학습 코드), make_data.py(예시 학습 데이터 생성)
+examples/          job.yaml(DDP 2노드 JobSet), train.py(DDP 예시 학습 코드), make_data.py(예시 학습 데이터 생성)
 ```
 
 ## 예시 작업 (`examples/`)
 
-- `job.yaml`: Pod 1개 × GPU 1개(분산 학습 없음). `python $CODE_DIR/train.py`를 실행한다.
+- `job.yaml`: DDP. Pod 2개 × GPU 1개(GPU 노드 2대, standby 없음). Indexed Job 하나에 `parallelism: 2`라서 Kueue가 GPU 2개를 한 번에 승인한다.
+  - 각 Pod가 `torchrun --nnodes=2 --nproc-per-node=1 --node-rank=$JOB_COMPLETION_INDEX`로 `train.py`를 실행한다.
+  - rank 0 주소는 JobSet headless Service의 DNS `<jobset>-trainer-0-0.<jobset>`이다. JobSet 이름은 Downward API(`JOBSET_NAME`)로 받는다. rank 1은 이 DNS가 생길 때까지 기다린다.
+  - g4dn.xlarge는 EFA가 없어서 NCCL은 Pod 네트워크(`eth0`) TCP로 통신한다.
+  - Pod 하나라도 실패하면 JobSet(`maxRestarts`)이 두 Pod를 같이 다시 띄운다.
 - `train.py`가 지키는 규칙:
-  - S3 코드가 없다. `/code`, `/data`, `/ckpt` 경로만 쓴다.
-  - 체크포인트는 1000 step마다 `ckpt-<step>.pt`로 저장한다. **메모리에 직렬화한 뒤 새 파일에 한 번에** 쓴다. Mountpoint는 rename과 append를 지원하지 않기 때문이다.
+  - S3 코드가 없다. `/code`, `/data`, `/ckpt` 경로만 쓴다. 두 Pod가 같은 `checkpoints/<id>/`를 본다.
+  - **모델은 S3에 하나만 저장한다.** DDP는 모든 rank의 가중치가 같으므로 rank 0만 1000 step마다 `ckpt-<step>.pt`를 쓰고, 끝나면 가중치만 `model.pt`로 쓴다.
+  - 체크포인트는 **메모리에 직렬화한 뒤 새 파일에 한 번에** 쓴다. Mountpoint는 rename과 append를 지원하지 않기 때문이다.
   - 최근 체크포인트 2개만 남긴다.
-  - 시작할 때 `/ckpt`의 최신 체크포인트에서 재개한다.
-  - 매 step DynamoDB에 진행 상태를 덮어쓴다. DynamoDB 오류가 나도 학습은 멈추지 않는다.
+  - 시작할 때 rank 0이 `/ckpt`의 최신 step을 골라 모든 rank에 broadcast하고, 모든 rank가 그 파일에서 가중치·optimizer 상태를 읽어 재개한다.
+  - rank 0이 매 step DynamoDB에 진행 상태를 덮어쓴다. DynamoDB 오류가 나도 학습은 멈추지 않는다.
+  - `torchrun` 없이 `python train.py`로 실행하면 프로세스 1개로 돈다. 로컬 CPU에서는 `torchrun --nproc-per-node=2`(gloo)로 확인할 수 있다.
 
 ### 학습 데이터 (`make_data.py` → `train.csv`)
 
@@ -99,7 +105,7 @@ examples/          job.yaml(단일 GPU JobSet), train.py(예시 학습 코드), 
 | 형식 | CSV, 헤더 없음, 5000행 × 9열, 약 380KB |
 | 입력 (앞 8열) | x1..x8, 각각 표준정규분포 N(0, 1)에서 뽑은 값 (소수 5자리) |
 | 레이블 (마지막 열) | y = w·x + ε. w는 seed 0으로 고정한 가중치 8개 `[0.942, -1.397, -0.680, 0.371, -1.016, -0.072, 0.179, -0.831]`, 노이즈 ε ~ N(0, 0.1²) |
-| 모델 | `train.py`의 MLP(8 → 256 → ReLU → 1), MSE loss, Adam(lr 1e-3), batch 256 |
+| 모델 | `train.py`의 MLP(8 → 256 → ReLU → 1), MSE loss, Adam(lr 1e-3), rank당 batch 256 (DDP 2 rank면 실효 512) |
 | 기대 결과 | 노이즈 분산이 0.01이라 loss가 약 0.01 근처까지 내려간다. 2026-10-27 실행에서 5000 step 후 loss는 0.0069였다 |
 
 ```sh
@@ -114,7 +120,7 @@ python examples/make_data.py train.csv   # 표준 라이브러리만 사용. 같
 |---|---|---|
 | `S3_BUCKET` | (필수) | `infra` 20-data의 `bucket_name` |
 | `PROGRESS_TABLE` | `devoops-job-progress` | 20-data의 `progress_table_name` |
-| `AWS_REGION` | `us-east-1` | |
+| `AWS_REGION` | `us-east-2` | |
 | `KUBECONFIG` / `KUBE_CONTEXT` | 기본 kubeconfig / 현재 context | 로컬 k3s |
 | `TRAINING_NAMESPACE` | `training` | 50-management 출력과 같아야 한다 |
 | `QUEUE_NAME` | `queue-auto` | 50-management 출력과 같아야 한다 |
