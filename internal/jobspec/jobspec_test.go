@@ -221,7 +221,9 @@ func TestPrepareMountsJobScopedS3Volumes(t *testing.T) {
 	claims := map[string]string{}
 	for _, v := range podSpec(t, js)["volumes"].([]any) {
 		vv := v.(map[string]any)
-		claims[vv["name"].(string)] = vv["persistentVolumeClaim"].(map[string]any)["claimName"].(string)
+		if pvc, ok := vv["persistentVolumeClaim"].(map[string]any); ok {
+			claims[vv["name"].(string)] = pvc["claimName"].(string)
+		}
 	}
 	for _, volume := range want {
 		if claims[volume] != volume {
@@ -244,12 +246,12 @@ func TestPrepareInjectsRuntimeEnv(t *testing.T) {
 		}
 	}
 	want := map[string]string{
-		"JOB_ID":         "abc123",
-		"PROGRESS_TABLE": "devoops-job-progress",
-		"CODE_DIR":       "/code",
-		"DATA_DIR":       "/data",
-		"CKPT_DIR":       "/ckpt",
-		// boto3(botocore)는 AWS_DEFAULT_REGION만 읽는다. 없으면 DynamoDB 클라이언트 생성이 NoRegionError로 실패한다.
+		"JOB_ID":        "abc123",
+		"PROGRESS_FILE": "/progress/progress.json",
+		"CODE_DIR":      "/code",
+		"DATA_DIR":      "/data",
+		"CKPT_DIR":      "/ckpt",
+		// boto3(botocore)는 AWS_DEFAULT_REGION만 읽는다. 사용자 코드가 AWS SDK를 쓸 때를 위해 둘 다 넣는다.
 		"AWS_REGION":         "us-east-1",
 		"AWS_DEFAULT_REGION": "us-east-1",
 	}
@@ -257,6 +259,9 @@ func TestPrepareInjectsRuntimeEnv(t *testing.T) {
 		if env[k] != v {
 			t.Errorf("env %s = %q, want %q", k, env[k], v)
 		}
+	}
+	if _, ok := env["PROGRESS_TABLE"]; ok {
+		t.Error("trainer must not get PROGRESS_TABLE; the progress sidecar owns DynamoDB writes")
 	}
 }
 

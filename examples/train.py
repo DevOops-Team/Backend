@@ -6,7 +6,8 @@
   - 모델은 S3에 하나만 저장한다. DDP는 모든 rank의 가중치가 같으므로 rank 0만 체크포인트를 쓴다.
   - 체크포인트는 새 파일을 처음부터 끝까지 한 번에 쓴다. Mountpoint는 rename·append를 지원하지 않으므로
     임시 파일 후 rename 방식은 쓰지 않는다. 시작 시 모든 rank가 rank 0이 고른 최신 체크포인트에서 재개한다.
-  - rank 0이 매 step DynamoDB($PROGRESS_TABLE, PK job_id)에 진행 상태를 덮어쓴다.
+  - rank 0이 매 step $PROGRESS_FILE에 현재 상태(JSON)를 덮어쓴다. DynamoDB에는 백엔드가 넣은
+    progress-reporter sidecar가 이 파일을 2초마다 읽어 쓴다. 그래서 학습 코드에는 AWS SDK가 없다.
 
 torchrun 없이 `python train.py`로 실행하면 프로세스 1개(world size 1)로 돈다.
 """
@@ -14,12 +15,11 @@ torchrun 없이 `python train.py`로 실행하면 프로세스 1개(world size 1
 import argparse
 import glob
 import io
+import json
 import os
 import re
-import time
-from decimal import Decimal
+import socket
 
-import boto3
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -29,8 +29,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 JOB_ID = os.environ["JOB_ID"]
 CKPT_DIR = os.environ.get("CKPT_DIR", "/ckpt")
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
-TABLE = os.environ.get("PROGRESS_TABLE", "")
-NODE = os.environ.get("NODE_NAME", "")
+PROGRESS_FILE = os.environ.get("PROGRESS_FILE", "")
 CKPT_RE = re.compile(r"ckpt-(\d+)\.pt$")
 KEEP_CHECKPOINTS = 2
 
@@ -106,41 +105,30 @@ def save_model(model):
         f.write(buf.getvalue())
 
 
-class ProgressWriter:
-    """DynamoDB 오류는 학습을 멈추지 않는다. rank 0이 아니면 아무것도 쓰지 않는다."""
+class ProgressFile:
+    """현재 상태를 $PROGRESS_FILE에 덮어쓴다. rank 0이 아니거나 경로가 없으면 아무것도 하지 않는다.
+
+    emptyDir(로컬 디스크)이라 임시 파일 후 rename으로 바꿔 sidecar가 반쯤 쓴 파일을 읽지 않게 한다.
+    """
 
     def __init__(self, enabled):
-        self.table = None
-        if not TABLE or not enabled:
-            return
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        try:
-            self.table = boto3.resource("dynamodb", region_name=region).Table(TABLE)
-        except Exception as e:  # noqa: BLE001
-            print(f"progress disabled: {e}", flush=True)
+        self.path = PROGRESS_FILE if enabled else ""
+        self.state = {}
 
     def write(self, **fields):
-        if not self.table:
+        if not self.path:
             return
-        fields["updated_at"] = int(time.time() * 1000)
-        names = {f"#{k}": k for k in fields}
-        # boto3는 float를 받지 않는다(DynamoDB N 타입은 Decimal).
-        values = {f":{k}": (Decimal(str(v)) if isinstance(v, float) else v) for k, v in fields.items()}
-        try:
-            self.table.update_item(
-                Key={"job_id": JOB_ID},
-                UpdateExpression="SET " + ", ".join(f"#{k} = :{k}" for k in fields),
-                ExpressionAttributeNames=names,
-                ExpressionAttributeValues=values,
-            )
-        except Exception as e:  # noqa: BLE001
-            print(f"progress write failed: {e}", flush=True)
+        self.state.update(fields)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.state, f)
+        os.replace(tmp, self.path)
 
 
 def main():
     args = parse_args()
     rank, world, device = init_distributed()
-    print(f"rank {rank}/{world} on {NODE or 'local'} ({device})", flush=True)
+    print(f"rank {rank}/{world} on {socket.gethostname()} ({device})", flush=True)
 
     x, y = load_data(device)
     net = nn.Sequential(nn.Linear(x.shape[1], 256), nn.ReLU(), nn.Linear(256, 1)).to(device)
@@ -156,9 +144,9 @@ def main():
         print(f"rank {rank}: resumed from ckpt-{start}.pt", flush=True)
     model = DDP(net, device_ids=[device.index] if device.type == "cuda" else None)
 
-    progress = ProgressWriter(enabled=rank == 0)
+    progress = ProgressFile(enabled=rank == 0)
     progress.write(status="RUNNING", step=start, total_steps=args.total_steps,
-                   last_checkpoint_step=start, node_name=NODE)
+                   last_checkpoint_step=start)
 
     # rank마다 다른 batch를 뽑는다. DDP가 gradient를 평균하므로 실효 batch = batch_size × world.
     g = torch.Generator(device=device).manual_seed(1000 + start * world + rank)

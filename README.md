@@ -36,7 +36,8 @@ multipart 필드: `job`(job.yaml), `train`(train.py), `data`(1개 이상)
 | Pod anti-affinity | 같은 그룹과 **다른 hostname** | GPU 노드 1대에 Pod 1개 |
 | toleration | `nvidia.com/gpu=true:NoSchedule` | Karpenter GPU 노드 taint. EKS는 이 toleration을 자동으로 붙이지 않는다 |
 | 볼륨 | PVC `s3-code`, `s3-datasets`, `s3-checkpoints`를 subPath `<id>`로 `/code`, `/data`, `/ckpt`에 마운트 | Mountpoint for S3. train.py에 S3 코드가 필요 없다 |
-| env | `JOB_ID`, `PROGRESS_TABLE`, `CODE_DIR`, `DATA_DIR`, `CKPT_DIR` | train.py가 쓰는 값 |
+| env | `JOB_ID`, `PROGRESS_FILE`, `CODE_DIR`, `DATA_DIR`, `CKPT_DIR`, `AWS_REGION` | train.py가 쓰는 값 |
+| 진행 상태 sidecar | `initContainers`에 `progress-reporter`(`restartPolicy: Always`, native sidecar), emptyDir `progress`를 학습 컨테이너와 함께 `/progress`에 마운트 | 학습 코드는 `/progress/progress.json`만 쓰고, sidecar가 2초마다 읽어 바뀌었으면 DynamoDB에 덮어쓴다. 학습 컨테이너가 끝나면 kubelet이 sidecar를 멈추므로 Job은 정상 완료된다 |
 
 사용자가 넣은 env, affinity, toleration, `maxRestarts`는 유지하고 위 값을 추가한다.
 
@@ -73,7 +74,7 @@ multipart 필드: `job`(job.yaml), `train`(train.py), `data`(1개 이상)
 
 ```
 cmd/server/        진입점 (환경변수 → 의존성 조립)
-internal/jobspec/  JobSet 검증·주입 (순수 로직)
+internal/jobspec/  JobSet 검증·주입 (순수 로직), progress_reporter.py(진행 상태 sidecar 스크립트, go:embed)
 internal/api/      HTTP 핸들러. S3·k8s·DynamoDB는 인터페이스로 받는다
 internal/kube/     k3s dynamic client: JobSet 생성, JobSet + Workload → 상태
 internal/store/    S3 업로드(multipart uploader), DynamoDB 진행 상태 조회
@@ -93,7 +94,8 @@ examples/          job.yaml(DDP 2노드 JobSet), train.py(DDP 예시 학습 코�
   - 체크포인트는 **메모리에 직렬화한 뒤 새 파일에 한 번에** 쓴다. Mountpoint는 rename과 append를 지원하지 않기 때문이다.
   - 최근 체크포인트 2개만 남긴다.
   - 시작할 때 rank 0이 `/ckpt`의 최신 step을 골라 모든 rank에 broadcast하고, 모든 rank가 그 파일에서 가중치·optimizer 상태를 읽어 재개한다.
-  - rank 0이 매 step DynamoDB에 진행 상태를 덮어쓴다. DynamoDB 오류가 나도 학습은 멈추지 않는다.
+  - rank 0이 매 step `$PROGRESS_FILE`에 현재 상태(JSON: `status`, `step`, `total_steps`, `loss`, `last_checkpoint_step`)를 덮어쓴다. 임시 파일 후 rename으로 바꾼다(emptyDir라 가능).
+  - DynamoDB에는 sidecar가 쓴다. 그래서 `train.py`에 boto3가 없고, DynamoDB 지연이나 오류가 학습 step을 막지 않는다.
   - `torchrun` 없이 `python train.py`로 실행하면 프로세스 1개로 돈다. 로컬 CPU에서는 `torchrun --nproc-per-node=2`(gloo)로 확인할 수 있다.
 
 ### 학습 데이터 (`make_data.py` → `train.csv`)

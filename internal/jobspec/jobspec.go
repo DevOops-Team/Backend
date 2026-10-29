@@ -7,7 +7,9 @@
 //     and one pod lands per GPU node,
 //   - tolerate the nvidia.com/gpu taint on Karpenter GPU nodes,
 //   - read code/data and write checkpoints through Mountpoint S3 volumes
-//     mounted at /code, /data and /ckpt (each scoped to the job ID).
+//     mounted at /code, /data and /ckpt (each scoped to the job ID),
+//   - write its progress to a local file that the progress-reporter sidecar
+//     copies to DynamoDB.
 package jobspec
 
 import (
@@ -144,7 +146,9 @@ func preparePodTemplate(job map[string]any, o Options) error {
 			"persistentVolumeClaim": map[string]any{"claimName": v.claim},
 		})
 	}
+	volumes = append(volumes, map[string]any{"name": progressVolume, "emptyDir": map[string]any{}})
 	spec["volumes"] = volumes
+	spec["initContainers"] = append(slice(spec["initContainers"]), progressSidecar(o))
 
 	containers := slice(spec["containers"])
 	if len(containers) == 0 {
@@ -159,14 +163,15 @@ func preparePodTemplate(job map[string]any, o Options) error {
 		for _, v := range s3Volumes {
 			mounts = append(mounts, map[string]any{"name": v.claim, "mountPath": v.mountPath, "subPath": o.JobID})
 		}
+		mounts = append(mounts, map[string]any{"name": progressVolume, "mountPath": progressDir})
 		cm["volumeMounts"] = mounts
 		cm["env"] = setEnv(slice(cm["env"]),
 			env("JOB_ID", o.JobID),
-			env("PROGRESS_TABLE", o.ProgressTable),
+			env("PROGRESS_FILE", progressFile),
 			env("CODE_DIR", "/code"),
 			env("DATA_DIR", "/data"),
 			env("CKPT_DIR", "/ckpt"),
-			// boto3(botocore)는 AWS_DEFAULT_REGION만 읽으므로 둘 다 넣는다.
+			// 사용자 코드가 AWS SDK를 쓸 때를 위해 둘 다 넣는다. boto3(botocore)는 AWS_DEFAULT_REGION만 읽는다.
 			env("AWS_REGION", o.Region),
 			env("AWS_DEFAULT_REGION", o.Region),
 		)

@@ -4,6 +4,7 @@
 #   - JobSet이 headless Service(이름 = JobSet 이름)를 만들어 Pod마다 DNS를 준다.
 #     rank 0 주소: <jobset>-trainer-0-0.<jobset>
 #   - 백엔드 hostname anti-affinity로 노드당 Pod 1개, zone affinity로 두 노드가 같은 AZ에 뜬다.
+#   - 백엔드가 progress-reporter sidecar를 넣는다. train.py가 쓴 진행 파일을 sidecar가 DynamoDB에 올린다.
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
@@ -30,7 +31,6 @@ spec:
               args:
               - |
                 set -e
-                pip install -q boto3
                 export MASTER_ADDR="${JOBSET_NAME}-trainer-0-0.${JOBSET_NAME}"
                 # rank 0 Pod의 DNS가 생길 때까지 기다린다 (두 Pod가 다른 노드에서 따로 뜬다).
                 until getent hosts "$MASTER_ADDR" >/dev/null; do echo "waiting for $MASTER_ADDR"; sleep 2; done
@@ -44,10 +44,6 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/jobset-name']
-              - name: NODE_NAME
-                valueFrom:
-                  fieldRef:
-                    fieldPath: spec.nodeName
               # g4dn.xlarge는 EFA가 없다. 노드 간 NCCL은 Pod 네트워크(eth0) TCP로 한다.
               - name: NCCL_SOCKET_IFNAME
                 value: eth0
