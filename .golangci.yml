@@ -1,0 +1,26 @@
+version: "2"
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  settings:
+    errcheck:
+      exclude-functions:
+        - (net/http.ResponseWriter).Write # 응답 쓰기 실패 = 클라이언트가 끊김. 할 수 있는 게 없다
+        - (*mime/multipart.Form).RemoveAll # 임시 파일 정리 (defer)
+  exclusions:
+    presets:
+      - std-error-handling # Close/Flush/Print류 반환값 무시는 허용
+      - common-false-positives
+    rules:
+      # feature/s3/manager.Uploader → transfermanager 이전은 별도 작업으로 한다.
+      - path: internal/repository/objects\.go
+        linters: [staticcheck]
+        text: "SA1019: .*feature/s3/manager"
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -1,0 +1,64 @@
+# GPT-2 small(124M) DDP 파인튜닝 예시 (g4dn.xlarge 2대 × GPU 1개). 구조는 ../job.yaml과 같다.
+# 백엔드가 이름·namespace·큐 라벨·S3 볼륨·affinity·toleration·progress sidecar를 채운다.
+#   - 데이터: make_data.py로 만든 train.txt (tiny-shakespeare)를 올린다.
+#   - 시작할 때 transformers를 설치하고 사전학습 가중치 "gpt2"(약 500MB)를 Hugging Face에서 받는다.
+#     장애로 재시작할 때마다 다시 받으므로 수십 초가 더 걸린다. 자주 쓰면 transformers를 넣은 이미지를 만든다.
+#   - 체크포인트는 약 1.5GB(가중치 + AdamW 상태)이고 250 step마다 rank 0이 /ckpt에 쓴다.
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: gpt2-ddp-example # 백엔드가 job-<id>로 바꾼다
+spec:
+  failurePolicy:
+    maxRestarts: 3 # Pod 하나라도 실패하면 두 Pod를 같이 다시 띄우고 /ckpt에서 재개한다
+  replicatedJobs:
+  - name: trainer
+    replicas: 1
+    template:
+      spec:
+        parallelism: 2
+        completions: 2
+        completionMode: Indexed
+        backoffLimit: 0
+        template:
+          spec:
+            restartPolicy: Never
+            containers:
+            - name: trainer
+              image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+              command: ["bash", "-c"]
+              args:
+              - |
+                set -e
+                # torch 2.5.1과 맞는 버전으로 고정한다. torch는 이미지에 있는 것을 그대로 쓴다.
+                pip install --no-cache-dir --quiet transformers==4.46.3
+                export MASTER_ADDR="${JOBSET_NAME}-trainer-0-0.${JOBSET_NAME}"
+                # rank 0 Pod의 DNS가 생길 때까지 기다린다 (두 Pod가 다른 노드에서 따로 뜬다).
+                until getent hosts "$MASTER_ADDR" >/dev/null; do echo "waiting for $MASTER_ADDR"; sleep 2; done
+                exec torchrun --nnodes=2 --nproc-per-node=1 --node-rank="$JOB_COMPLETION_INDEX" \
+                  --master-addr="$MASTER_ADDR" --master-port=29500 \
+                  "${CODE_DIR}/train.py" --model gpt2 --total-steps 2000 --ckpt-every 250
+              ports:
+              - containerPort: 29500
+              env:
+              - name: JOBSET_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['jobset.sigs.k8s.io/jobset-name']
+              # g4dn.xlarge는 EFA가 없다. 노드 간 NCCL은 Pod 네트워크(eth0) TCP로 한다.
+              - name: NCCL_SOCKET_IFNAME
+                value: eth0
+              - name: NCCL_IB_DISABLE
+                value: "1"
+              - name: TOKENIZERS_PARALLELISM
+                value: "false"
+              - name: PYTORCH_CUDA_ALLOC_CONF
+                value: expandable_segments:True
+              resources:
+                requests:
+                  cpu: "3"
+                  memory: 12Gi
+                  nvidia.com/gpu: 1
+                limits:
+                  memory: 12Gi
+                  nvidia.com/gpu: 1
