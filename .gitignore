@@ -1,3 +1,11 @@
 /server
-.env*
 *.kubeconfig
+
+# 협업 규칙 §3: 모든 레포 공통
+.env*
+*.pem
+*.key
+kubeconfig*
+*.tfvars
+!*.tfvars.example
+.DS_Store
