@@ -43,6 +43,9 @@ jobs:
     name: image
     needs: check
     runs-on: ubuntu-latest
+    outputs:
+      image: ${{ env.IMAGE }}
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -65,7 +68,8 @@ jobs:
           tags: |
             type=raw,value=main
             type=sha,prefix=sha-,format=short
-      - uses: docker/build-push-action@v7
+      - id: build
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deployments/Dockerfile
@@ -75,3 +79,20 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # GPU-114 · ADR-23: main 이미지 digest를 Gitops overlay에 반영한다.
+  # 로직은 Gitops 재사용 워크플로 한 곳에 있다. 값은 Variables(DEPLOY_APP_ID · GITOPS_REPO · GITOPS_OVERLAY)와
+  # Secret(DEPLOY_APP_PRIVATE_KEY)에서 받고, digest는 image job 출력을 쓴다.
+  deploy:
+    name: gitops deploy
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: DevOops-Team/Gitops/.github/workflows/update-image.yml@main
+    with:
+      image: ${{ needs.image.outputs.image }}
+      digest: ${{ needs.image.outputs.digest }}
+      overlay: ${{ vars.GITOPS_OVERLAY }}
+      app-id: ${{ vars.DEPLOY_APP_ID }}
+      gitops-repo: ${{ vars.GITOPS_REPO }}
+    secrets:
+      app-private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
