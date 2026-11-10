@@ -213,7 +213,7 @@ go test -race ./...
 
 | 시점 | 실행 | 이미지 |
 |---|---|---|
-| `dev`·`main`행 PR, `dev` push | `golangci-lint` → `redocly lint`(OpenAPI) → `go test -race ./...` → `go build` → 이미지 빌드 | push 안 함 |
+| `develop`·`main`행 PR, `develop` push | `golangci-lint` → `redocly lint`(OpenAPI) → `go test -race ./...` → `go build` → 이미지 빌드 | push 안 함 |
 | `main` push(머지) | 같은 검사 → 이미지 빌드 | `ghcr.io/devoops-team/backend:main`, `:sha-<커밋 7자리>` (linux/amd64) |
 
 GHCR 로그인은 기본 `GITHUB_TOKEN`을 쓴다. `main`행 PR 리뷰어는 `.github/CODEOWNERS`(정·부담당)다.
