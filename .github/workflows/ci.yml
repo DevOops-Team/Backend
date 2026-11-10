@@ -1,13 +1,13 @@
 # 협업 규칙 §7 CI 파이프라인.
-#   PR(→ dev, → main), dev push : 린트(Go · OpenAPI) · 테스트 · 빌드 + 이미지 빌드 (push 안 함)
+#   PR(→ develop, → main), develop push : 린트(Go · OpenAPI) · 테스트 · 빌드 + 이미지 빌드 (push 안 함)
 #   main push(머지)             : 같은 검사 → 이미지 push  ghcr.io/devoops-team/backend:{main, sha-<7자리>}
 name: CI
 
 on:
   pull_request:
-    branches: [dev, main]
+    branches: [develop, main]
   push:
-    branches: [dev, main]
+    branches: [develop, main]
 
 permissions:
   contents: read
