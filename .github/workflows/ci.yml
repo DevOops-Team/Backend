@@ -43,6 +43,8 @@ jobs:
     name: image
     needs: check
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       packages: write
@@ -65,7 +67,8 @@ jobs:
           tags: |
             type=raw,value=main
             type=sha,prefix=sha-,format=short
-      - uses: docker/build-push-action@v7
+      - id: build
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deployments/Dockerfile
@@ -75,3 +78,70 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # GPU-114 · ADR-21: main 이미지 digest를 Gitops overlay에 반영한다.
+  # 코드 레포 main 머지(리뷰 완료)로 승인된 것으로 보고, GitHub App 봇이 Gitops main에 직접 커밋한다.
+  # 값은 하드코딩하지 않는다: App ID · 대상 레포 · overlay 경로는 Variables, 비밀키는 Secrets, digest는 빌드 출력.
+  deploy:
+    name: gitops deploy
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: gitops-deploy-${{ github.repository }}
+      cancel-in-progress: false
+    env:
+      DIGEST: ${{ needs.image.outputs.digest }}
+      GITOPS_REPO: ${{ vars.GITOPS_REPO }}
+      GITOPS_OVERLAY: ${{ vars.GITOPS_OVERLAY }}
+      KUSTOMIZE_VERSION: v5.4.3
+    steps:
+      - name: Check inputs
+        run: |
+          test -n "$DIGEST" || { echo "::error::image digest가 비어 있음"; exit 1; }
+          test -n "$GITOPS_REPO" && test -n "$GITOPS_OVERLAY" || { echo "::error::Variables GITOPS_REPO · GITOPS_OVERLAY 필요"; exit 1; }
+      - id: target
+        name: Split GITOPS_REPO (owner/name)
+        run: |
+          echo "owner=${GITOPS_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${GITOPS_REPO#*/}" >> "$GITHUB_OUTPUT"
+      - id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target.outputs.owner }}
+          repositories: ${{ steps.target.outputs.name }}
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ vars.GITOPS_REPO }}
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+          path: gitops
+      - name: Install kustomize
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            | tar xz -C "$RUNNER_TEMP/bin" kustomize
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Update image digest and push
+        working-directory: gitops
+        env:
+          BOT_NAME: ${{ steps.app-token.outputs.app-slug }}[bot]
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          git config user.name "$BOT_NAME"
+          git config user.email "${BOT_NAME}@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            (cd "$GITOPS_OVERLAY" && kustomize edit set image "${IMAGE}=${IMAGE}@${DIGEST}")
+            if git diff --quiet; then echo "이미 ${DIGEST} — 변경 없음"; exit 0; fi
+            git commit -am "deploy(${IMAGE##*/}): sha-${short_sha}" \
+              -m "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}" -m "image: ${IMAGE}@${DIGEST}"
+            git push origin HEAD:main && exit 0
+            echo "push 충돌 — main 다시 받아 재시도 (${attempt}/3)"
+            git fetch origin main && git reset --hard origin/main
+          done
+          echo "::error::Gitops main push 실패"; exit 1
+
