@@ -34,8 +34,8 @@ func TestDefaultSettingsDescribeTheFSDPTest(t *testing.T) {
 	if s.Strategies["fsdp"].CheckpointFormat != "fsdp-dcp" {
 		t.Errorf("fsdp format = %q", s.Strategies["fsdp"].CheckpointFormat)
 	}
-	if q, err := s.QueueFor(2); err != nil || q != "queue-auto" {
-		t.Errorf("QueueFor(2) = %q, %v; infra only has queue-auto", q, err)
+	if q, err := s.QueueFor(2); err != nil || q != "queue-light" {
+		t.Errorf("QueueFor(2) = %q, %v; 2 GPUs go to the light queue", q, err)
 	}
 }
 

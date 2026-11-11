@@ -1,8 +1,8 @@
 {
   "service_account": "",
   "queues": {
-    "light": { "name": "queue-auto", "gpus": [1, 2] },
-    "heavy": { "name": "queue-auto", "gpus": [3, 4] }
+    "light": { "name": "queue-light", "gpus": [1, 2] },
+    "heavy": { "name": "queue-heavy", "gpus": [3, 4] }
   },
   "priority_classes": { "training": "" },
   "images": {
