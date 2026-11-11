@@ -72,3 +72,28 @@ func TestLoadRejectsProfileWhoseStrategyHasNoFormat(t *testing.T) {
 		t.Errorf("err = %v, want missing strategy error", err)
 	}
 }
+
+func TestWithCheckpointImageOverridesOnlyWhenSet(t *testing.T) {
+	base := Settings{Images: Images{Trainer: "trainer", Checkpoint: "from-file"}}
+
+	if got := base.WithCheckpointImage(""); got.Images.Checkpoint != "from-file" {
+		t.Errorf("empty env: checkpoint = %q, want the settings file value", got.Images.Checkpoint)
+	}
+	got := base.WithCheckpointImage("ghcr.io/devoops-team/checkpoint@sha256:abc")
+	if got.Images.Checkpoint != "ghcr.io/devoops-team/checkpoint@sha256:abc" || got.Images.Trainer != "trainer" {
+		t.Errorf("images = %+v, want env checkpoint and the trainer untouched", got.Images)
+	}
+	if base.Images.Checkpoint != "from-file" {
+		t.Error("WithCheckpointImage changed the receiver")
+	}
+}
+
+func TestDefaultSettingsHaveNoCheckpointImage(t *testing.T) {
+	s, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Images.Checkpoint != "" {
+		t.Errorf("default checkpoint = %q; it comes from CHECKPOINT_IMAGE (Gitops), not the embedded file", s.Images.Checkpoint)
+	}
+}

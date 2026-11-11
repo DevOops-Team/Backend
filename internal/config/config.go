@@ -15,6 +15,10 @@ type Config struct {
 	KubeContext   string // KUBE_CONTEXT: empty = current context
 	Namespace     string // TRAINING_NAMESPACE: must match 50-management
 	SettingsPath  string // BACKEND_SETTINGS: empty = embedded internal/settings/default.json
+	// CHECKPOINT_IMAGE: ckpt-init · ckpt-sidecar image for the training JobSet (Data repo checkpoint/).
+	// Gitops sets it and the deploy bot pins the digest, so a new checkpoint image needs no backend build.
+	// Empty = the settings file value.
+	CheckpointImage string
 }
 
 // Load reads the configuration through getenv (os.Getenv in main, a map in tests).
@@ -36,6 +40,8 @@ func Load(getenv func(string) string) (Config, error) {
 		KubeContext:   getenv("KUBE_CONTEXT"),
 		Namespace:     get("TRAINING_NAMESPACE", "training"),
 		SettingsPath:  getenv("BACKEND_SETTINGS"),
+
+		CheckpointImage: getenv("CHECKPOINT_IMAGE"),
 	}
 	if cfg.Bucket == "" {
 		return Config{}, errors.New("S3_BUCKET is required")

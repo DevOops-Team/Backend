@@ -37,6 +37,7 @@ func TestLoadReadsEveryVariable(t *testing.T) {
 		"KUBE_CONTEXT":       "k3d-devoops-mgmt",
 		"TRAINING_NAMESPACE": "ns",
 		"BACKEND_SETTINGS":   "/etc/settings.json",
+		"CHECKPOINT_IMAGE":   "ghcr.io/devoops-team/checkpoint@sha256:abc",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -45,6 +46,7 @@ func TestLoadReadsEveryVariable(t *testing.T) {
 		ListenAddr: ":9090", AllowedOrigin: "https://app.example", Region: "ap-northeast-2",
 		Bucket: "b", ProgressTable: "p", EventsTable: "e",
 		Kubeconfig: "/kube/config", KubeContext: "k3d-devoops-mgmt", Namespace: "ns", SettingsPath: "/etc/settings.json",
+		CheckpointImage: "ghcr.io/devoops-team/checkpoint@sha256:abc",
 	}
 	if cfg != want {
 		t.Errorf("cfg = %+v\nwant  %+v", cfg, want)
