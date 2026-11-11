@@ -42,6 +42,9 @@ type PriorityClasses struct {
 type Images struct {
 	Trainer          string `json:"trainer"`
 	ProgressReporter string `json:"progress_reporter"`
+	// Checkpoint is the ckpt-init · ckpt-sidecar image (JobSet 템플릿 합의안, ADR-12). It normally comes
+	// from the CHECKPOINT_IMAGE env (WithCheckpointImage); empty = the JobSet has no checkpoint containers yet.
+	Checkpoint string `json:"checkpoint,omitempty"`
 }
 
 type Pod struct {
@@ -128,6 +131,15 @@ func Load(path string) (Settings, error) {
 		}
 	}
 	return s, nil
+}
+
+// WithCheckpointImage returns s with the checkpoint image set from the environment. An empty value
+// keeps the settings file value, so local runs without the env behave as before.
+func (s Settings) WithCheckpointImage(image string) Settings {
+	if image != "" {
+		s.Images.Checkpoint = image
+	}
+	return s
 }
 
 // QueueFor returns the queue that takes this many GPUs.
