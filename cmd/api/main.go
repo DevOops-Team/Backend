@@ -50,6 +50,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	jobSettings = jobSettings.WithCheckpointImage(cfg.CheckpointImage)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

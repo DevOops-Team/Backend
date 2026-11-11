@@ -183,6 +183,7 @@ python examples/make_data.py train.csv   # 표준 라이브러리만 사용. 같
 | `KUBECONFIG` / `KUBE_CONTEXT` | 기본 kubeconfig / 현재 context | 로컬 k3s |
 | `TRAINING_NAMESPACE` | `training` | 50-management 출력과 같아야 한다 |
 | `BACKEND_SETTINGS` | 내장 `default.json` | 큐 · 이미지 · 모델 프로파일 파일 경로 |
+| `CHECKPOINT_IMAGE` | 비어 있음 (설정 파일 값) | 학습 JobSet의 ckpt-init · ckpt-sidecar 이미지 (Data `checkpoint/`). Gitops가 넣고 Data CI 봇이 digest를 갱신한다. 아직 JobSet에 쓰지 않음 |
 | `ALLOWED_ORIGIN` | `http://localhost:5173` | 프론트 주소 |
 | `LISTEN_ADDR` | `:8080` | |
 
