@@ -272,7 +272,7 @@ func TestSubmitStoresTheJobSetItSubmits(t *testing.T) {
 		t.Errorf("jobset.json differs from the submitted object")
 	}
 	if created.JobsetName != "job-3f9a1c2e-g0001" || created.Generation != 1 || created.Status != model.StatusQueued ||
-		created.Queue != "queue-auto" || created.ID != "3f9a1c2e" {
+		created.Queue != "queue-light" || created.ID != "3f9a1c2e" {
 		t.Errorf("created = %+v", created)
 	}
 }
@@ -470,7 +470,7 @@ func TestSubmitRecordsSubmittedAsFirstTimelineStep(t *testing.T) {
 	}
 	e := d.events.puts[0]
 	if e.JobID != "3f9a1c2e" || e.Reason != "Submitted" || e.Key != "2026-11-05T02:12:39.000Z#k3s#submitted" ||
-		!strings.Contains(e.Message, "queue-auto") || e.Object != "JobSet/job-3f9a1c2e-g0001" {
+		!strings.Contains(e.Message, "queue-light") || e.Object != "JobSet/job-3f9a1c2e-g0001" {
 		t.Errorf("event = %+v", e)
 	}
 }
