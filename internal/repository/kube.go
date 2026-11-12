@@ -22,8 +22,6 @@ var (
 	JobSetGVR   = schema.GroupVersionResource{Group: "jobset.x-k8s.io", Version: "v1alpha2", Resource: "jobsets"}
 	WorkloadGVR = schema.GroupVersionResource{Group: "kueue.x-k8s.io", Version: "v1beta2", Resource: "workloads"}
 	EventGVR    = schema.GroupVersionResource{Version: "v1", Resource: "events"}
-
-	metav1GetOptions = metav1.GetOptions{}
 )
 
 // Kube submits JobSets to k3s and reads their state (JobSet + Workload → status, Events for the timeline).

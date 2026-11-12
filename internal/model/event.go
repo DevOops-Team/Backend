@@ -24,3 +24,17 @@ type JobEvent struct {
 	Object   string    `json:"object"` // Kind/name the event is about
 	Count    int64     `json:"count"`
 }
+
+// SubmittedEvent is what the backend reports to Kafka job.lifecycle when it creates a job (type
+// job.submitted, Data repo collector: data.job_runs).
+type SubmittedEvent struct {
+	JobID        string
+	Generation   int
+	JobsetName   string
+	GPUs         int
+	Strategy     string
+	Queue        string
+	ConfigSHA256 string
+	ImageDigest  string // trainer image digest, "" when the image is not pinned
+	OccurredAt   time.Time
+}

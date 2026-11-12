@@ -9,21 +9,18 @@ import (
 
 	"github.com/DevOops-Team/Backend/internal/middleware"
 	"github.com/DevOops-Team/Backend/internal/model"
+	"github.com/DevOops-Team/Backend/internal/service"
 )
 
 // JobService is what the handlers need from internal/service.JobService.
 type JobService interface {
-	Submit(ctx context.Context, req model.SubmitJobRequest) (model.CreatedJob, error)
+	Options() model.TrainingOptions
+	Submit(ctx context.Context, spec model.SubmitSpec, src service.UploadSource) (model.CreatedJob, error)
 	List(ctx context.Context) ([]model.Job, error)
 	Get(ctx context.Context, id string) (model.Job, error)
 	Events(ctx context.Context, id string) ([]model.JobEvent, error)
 	Files(ctx context.Context, id string) ([]model.File, error)
 	File(ctx context.Context, id, kind, name string) (model.FileContent, error)
-	Models(ctx context.Context) ([]model.Model, error)
-	ModelFile(ctx context.Context, name, file string) (model.FileContent, error)
-	Datasets(ctx context.Context) ([]model.Dataset, error)
-	Dataset(ctx context.Context, id string) (model.Dataset, error)
-	DatasetFile(ctx context.Context, id string, version int, name string) (model.FileContent, error)
 }
 
 // NewRouter wires middleware and routes. The API routes must match api/openapi.yaml
@@ -37,11 +34,7 @@ func NewRouter(jobs JobService, allowedOrigin string) *gin.Engine {
 
 	h := &jobHandler{jobs: jobs}
 	r.GET("/healthz", healthz)
-	r.GET("/api/models", h.models)
-	r.GET("/api/models/:name/files/:file", h.modelFile)
-	r.GET("/api/datasets", h.datasets)
-	r.GET("/api/datasets/:id", h.dataset)
-	r.GET("/api/datasets/:id/versions/:version/files/:name", h.datasetFile)
+	r.GET("/api/training/options", h.options)
 	r.POST("/api/jobs", h.create)
 	r.GET("/api/jobs", h.list)
 	r.GET("/api/jobs/:id", h.get)

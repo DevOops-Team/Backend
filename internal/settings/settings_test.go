@@ -7,35 +7,41 @@ import (
 	"testing"
 )
 
-func TestDefaultSettingsDescribeTheFSDPTest(t *testing.T) {
+func TestDefaultSettingsDescribeTheEKSATestCluster(t *testing.T) {
 	s, err := Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	gpt2, ok := s.ModelProfiles["gpt2"]
-	if !ok {
-		t.Fatal("gpt2 profile missing")
+	tr := s.Training
+	if tr.DefaultStrategy != "fsdp" || tr.GPUs.Default != 2 || tr.GPUs.Max != 2 {
+		t.Errorf("training = %+v, want fsdp on the two GPU nodes eks-a has", tr)
 	}
-	if gpt2.DefaultStrategy != "fsdp" || gpt2.GPUs.Default != 2 || gpt2.GPUs.Max != 2 {
-		t.Errorf("gpt2 = %+v, want fsdp on the two GPU nodes the infra has", gpt2)
-	}
-	if got := strings.Join(gpt2.Strategies, ","); got != "fsdp,ddp" {
-		t.Errorf("strategies = %s", got)
-	}
-	if got := gpt2.GPUs.Options; len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 4 {
+	if got := tr.GPUs.Options; len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 4 {
 		t.Errorf("gpu options = %v, want 1, 2, 4", got)
+	}
+	if tr.DatasetFormat != "text-jsonl" {
+		t.Errorf("dataset format = %q", tr.DatasetFormat)
 	}
 	if s.Strategies["fsdp"].MinGPUs != 2 || s.Strategies["ddp"].MinGPUs != 1 {
 		t.Errorf("min gpus = %+v", s.Strategies)
 	}
-	if s.Strategies["ddp"].CheckpointFormat != "ddp-pt" {
-		t.Errorf("ddp format = %q", s.Strategies["ddp"].CheckpointFormat)
-	}
-	if s.Strategies["fsdp"].CheckpointFormat != "fsdp-dcp" {
-		t.Errorf("fsdp format = %q", s.Strategies["fsdp"].CheckpointFormat)
+	if s.Strategies["ddp"].CheckpointFormat != "ddp-pt" || s.Strategies["fsdp"].CheckpointFormat != "fsdp-dcp" {
+		t.Errorf("formats = %+v", s.Strategies)
 	}
 	if q, err := s.QueueFor(2); err != nil || q != "queue-light" {
 		t.Errorf("QueueFor(2) = %q, %v; 2 GPUs go to the light queue", q, err)
+	}
+	if s.ServiceAccount != "trainer" || s.PriorityClasses.Training != "training" {
+		t.Errorf("sa = %q, priority = %q; the agreed template uses trainer and training", s.ServiceAccount, s.PriorityClasses.Training)
+	}
+	if s.Checkpoint.MTBFSeconds != 6*3600 {
+		t.Errorf("mtbf = %v, want the 6h default", s.Checkpoint.MTBFSeconds)
+	}
+	if s.Limits.MaxModelBytes != 2<<30 || s.Limits.MaxDataBytes != 1<<30 {
+		t.Errorf("limits = %+v", s.Limits)
+	}
+	if s.Images.Trainer != "" || s.Images.Checkpoint != "" {
+		t.Errorf("images = %+v; trainer and checkpoint come from env (Gitops), not the embedded file", s.Images)
 	}
 }
 
@@ -62,38 +68,31 @@ func TestLoadReadsFileAndRejectsUnknownKeys(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsProfileWhoseStrategyHasNoFormat(t *testing.T) {
+func TestLoadRejectsInconsistentValues(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.json")
-	body := `{"model_profiles":{"m":{"strategies":["fsdp"],"default_strategy":"fsdp"}},"strategies":{}}`
+	body := `{"strategies":{"fsdp":{}},"training":{"default_strategy":"ddp","gpus":{"max":1,"default":2,"options":[2]}}}`
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "fsdp") {
-		t.Errorf("err = %v, want missing strategy error", err)
+	_, err := Load(path)
+	for _, want := range []string{"default_strategy", "checkpoint_format", "gpus.default", "checkpoint values", "limits"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to mention %s", err, want)
+		}
 	}
 }
 
-func TestWithCheckpointImageOverridesOnlyWhenSet(t *testing.T) {
-	base := Settings{Images: Images{Trainer: "trainer", Checkpoint: "from-file"}}
+func TestWithImagesOverridesOnlyWhenSet(t *testing.T) {
+	base := Settings{Images: Images{Trainer: "t-file", Checkpoint: "c-file", ProgressReporter: "p"}}
 
-	if got := base.WithCheckpointImage(""); got.Images.Checkpoint != "from-file" {
-		t.Errorf("empty env: checkpoint = %q, want the settings file value", got.Images.Checkpoint)
+	if got := base.WithImages("", ""); got.Images != base.Images {
+		t.Errorf("empty env: images = %+v, want the settings file values", got.Images)
 	}
-	got := base.WithCheckpointImage("ghcr.io/devoops-team/checkpoint@sha256:abc")
-	if got.Images.Checkpoint != "ghcr.io/devoops-team/checkpoint@sha256:abc" || got.Images.Trainer != "trainer" {
-		t.Errorf("images = %+v, want env checkpoint and the trainer untouched", got.Images)
+	got := base.WithImages("ghcr.io/devoops-team/trainer@sha256:t", "ghcr.io/devoops-team/checkpoint@sha256:c")
+	if got.Images.Trainer != "ghcr.io/devoops-team/trainer@sha256:t" || got.Images.Checkpoint != "ghcr.io/devoops-team/checkpoint@sha256:c" || got.Images.ProgressReporter != "p" {
+		t.Errorf("images = %+v", got.Images)
 	}
-	if base.Images.Checkpoint != "from-file" {
-		t.Error("WithCheckpointImage changed the receiver")
-	}
-}
-
-func TestDefaultSettingsHaveNoCheckpointImage(t *testing.T) {
-	s, err := Load("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.Images.Checkpoint != "" {
-		t.Errorf("default checkpoint = %q; it comes from CHECKPOINT_IMAGE (Gitops), not the embedded file", s.Images.Checkpoint)
+	if base.Images.Trainer != "t-file" {
+		t.Error("WithImages changed the receiver")
 	}
 }
