@@ -43,9 +43,8 @@ type PriorityClasses struct {
 // Data repo checkpoint/) normally come from the TRAINER_IMAGE · CHECKPOINT_IMAGE env (WithImages),
 // so the deploy bot can pin their digests without a backend build.
 type Images struct {
-	Trainer          string `json:"trainer,omitempty"`
-	Checkpoint       string `json:"checkpoint,omitempty"`
-	ProgressReporter string `json:"progress_reporter"`
+	Trainer    string `json:"trainer,omitempty"`
+	Checkpoint string `json:"checkpoint,omitempty"` // also runs the progress-reporter sidecar (Python + boto3)
 }
 
 type Pod struct {

@@ -605,9 +605,8 @@ func (s *JobService) Get(ctx context.Context, id string) (model.Job, error) {
 	}
 	images := s.cfg.Settings.Images
 	job.Images = map[string]string{
-		"trainer":          images.Trainer,
-		"checkpoint":       images.Checkpoint,
-		"progressReporter": images.ProgressReporter,
+		"trainer":    images.Trainer,
+		"checkpoint": images.Checkpoint,
 	}
 	return job, nil
 }

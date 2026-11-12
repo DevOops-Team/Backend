@@ -141,7 +141,7 @@ func renderPod(in Input, name, generation string) map[string]any {
 	pod := in.Settings.Pod
 	group := map[string]any{"matchLabels": map[string]any{model.GPUGroupLabel: model.GPUGroupValue}}
 	inits := []any{ckptInit(in, generation), ckptSidecar(in, generation)}
-	if in.Settings.Images.ProgressReporter != "" && in.ProgressTable != "" {
+	if in.ProgressTable != "" {
 		inits = append(inits, progressSidecar(in, generation))
 	}
 	spec := map[string]any{

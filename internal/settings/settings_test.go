@@ -83,13 +83,13 @@ func TestLoadRejectsInconsistentValues(t *testing.T) {
 }
 
 func TestWithImagesOverridesOnlyWhenSet(t *testing.T) {
-	base := Settings{Images: Images{Trainer: "t-file", Checkpoint: "c-file", ProgressReporter: "p"}}
+	base := Settings{Images: Images{Trainer: "t-file", Checkpoint: "c-file"}}
 
 	if got := base.WithImages("", ""); got.Images != base.Images {
 		t.Errorf("empty env: images = %+v, want the settings file values", got.Images)
 	}
 	got := base.WithImages("ghcr.io/devoops-team/trainer@sha256:t", "ghcr.io/devoops-team/checkpoint@sha256:c")
-	if got.Images.Trainer != "ghcr.io/devoops-team/trainer@sha256:t" || got.Images.Checkpoint != "ghcr.io/devoops-team/checkpoint@sha256:c" || got.Images.ProgressReporter != "p" {
+	if got.Images.Trainer != "ghcr.io/devoops-team/trainer@sha256:t" || got.Images.Checkpoint != "ghcr.io/devoops-team/checkpoint@sha256:c" {
 		t.Errorf("images = %+v", got.Images)
 	}
 	if base.Images.Trainer != "t-file" {

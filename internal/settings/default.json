@@ -5,9 +5,6 @@
     "heavy": { "name": "queue-heavy", "gpus": [3, 4] }
   },
   "priority_classes": { "training": "training" },
-  "images": {
-    "progress_reporter": "public.ecr.aws/docker/library/python:3.12-slim"
-  },
   "pod": {
     "cpu_request": "3",
     "memory_request": "12Gi",

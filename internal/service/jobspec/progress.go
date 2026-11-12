@@ -20,7 +20,7 @@ var progressReporter string
 func progressSidecar(in Input, generation string) map[string]any {
 	return map[string]any{
 		"name":          ProgressSidecarName,
-		"image":         in.Settings.Images.ProgressReporter,
+		"image":         in.Settings.Images.Checkpoint, // ckpt-agent image: Python + boto3 already inside
 		"restartPolicy": "Always",
 		"command":       []any{"python", "-u", "-c"},
 		"args":          []any{progressReporter},
@@ -31,9 +31,6 @@ func progressSidecar(in Input, generation string) map[string]any {
 			env("PROGRESS_FILE", progressFile),
 			env("AWS_REGION", in.Region),
 			env("AWS_DEFAULT_REGION", in.Region),
-			// The pod runs as 1000 and the public image has no boto3: pip falls back to a user install
-			// under $HOME, which must be writable.
-			env("HOME", "/tmp"),
 			map[string]any{
 				"name":      "NODE_NAME",
 				"valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "spec.nodeName"}},

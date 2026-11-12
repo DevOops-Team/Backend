@@ -303,9 +303,16 @@ func TestRenderAddsProgressReporterAsNativeSidecar(t *testing.T) {
 	if sc["restartPolicy"] != "Always" {
 		t.Errorf("restartPolicy = %v", sc["restartPolicy"])
 	}
+	// The checkpoint image already ships Python and boto3: no pip install from the internet at run time.
+	if sc["image"] != "ghcr.io/devoops-team/checkpoint@sha256:c1" {
+		t.Errorf("image = %v, want the checkpoint image", sc["image"])
+	}
+	if a, _ := json.Marshal(sc["args"]); strings.Contains(string(a), "pip install") {
+		t.Error("progress-reporter still installs packages at run time")
+	}
 	got := envOf(sc)
 	for k, want := range map[string]string{
-		"JOB_ID": "3f9a1c2e", "GENERATION": "1", "PROGRESS_TABLE": "devoops-prod-job-progress", "HOME": "/tmp",
+		"JOB_ID": "3f9a1c2e", "GENERATION": "1", "PROGRESS_TABLE": "devoops-prod-job-progress",
 	} {
 		if got[k] != want {
 			t.Errorf("env %s = %q, want %q", k, got[k], want)
