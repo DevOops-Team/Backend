@@ -135,7 +135,7 @@ paths:
       tags: [jobs]
       summary: 전달 타임라인 (시간순)
       operationId: listJobEvents
-      description: 작업이 GPU까지 가는 동안 거친 단계. k3s 단계는 백엔드가, EKS 단계는 각 워커의 job-watcher가 DynamoDB `devoops-job-events`에 쓴다.
+      description: 작업이 GPU까지 가는 동안 거친 단계. 온프레 관리 클러스터(`onprem`) 단계는 백엔드가 Kubernetes Event · Kueue Workload에서 모은다.
       parameters:
         - $ref: "#/components/parameters/JobID"
       responses:
@@ -229,7 +229,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     BadGateway:
-      description: S3 · k3s · DynamoDB 오류
+      description: S3 · 관리 클러스터 · DynamoDB 오류
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -382,7 +382,7 @@ components:
       type: string
       enum: [Pending, Admitted, Running, Succeeded, Failed]
       description: |
-        현재 세대의 k3s 상태.
+        현재 세대의 관리 클러스터 상태.
         - Pending: 큐에서 승인 대기
         - Admitted: 워커가 쿼터를 잡음
         - Running: active Pod가 있음
@@ -447,7 +447,7 @@ components:
         key: { type: string, description: "정렬 키 `<시각 ms UTC>#<클러스터>#<ID>`. 반복 이벤트는 같은 키를 덮어쓴다" }
         time: { type: string, format: date-time, description: 처음 본 시각 }
         lastTime: { type: string, format: date-time, description: 마지막으로 본 시각 }
-        cluster: { type: string, description: "`k3s`(관리 클러스터) 또는 EKS 워커 이름" }
+        cluster: { type: string, description: "`onprem`(온프레 관리 클러스터) 또는 EKS 워커 이름" }
         source: { type: string, description: "backend, kueue-admission, multikueue, jobset, default-scheduler, karpenter, kubelet, ..." }
         reason: { type: string }
         message: { type: string }

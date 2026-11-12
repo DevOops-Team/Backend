@@ -14,7 +14,7 @@ const (
 	KindNotFound                      // no such job, dataset or file (404)
 	KindConflict                      // the JobSet already exists (409)
 	KindUnprocessable                 // dataset format the model does not read (422)
-	KindUpstream                      // S3, k3s or DynamoDB failed (502)
+	KindUpstream                      // S3, the management cluster or DynamoDB failed (502)
 	KindTooLarge                      // the upload is over a limit (413)
 )
 
