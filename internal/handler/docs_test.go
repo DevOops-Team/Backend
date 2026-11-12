@@ -2,17 +2,22 @@ package handler
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"sigs.k8s.io/yaml"
 
 	"github.com/DevOops-Team/Backend/api"
 )
 
 var ginParam = regexp.MustCompile(`:(\w+)`)
+
+// newRouter builds the real router; listing routes and serving the docs never call the service.
+func newRouter(jobs JobService) *gin.Engine { return NewRouter(jobs, "http://localhost:5173") }
 
 // openapi.yaml is maintained by hand, so this keeps it in step with the routes Gin actually serves.
 func TestOpenAPISpecMatchesRoutes(t *testing.T) {
@@ -34,7 +39,7 @@ func TestOpenAPISpecMatchesRoutes(t *testing.T) {
 		}
 	}
 	var served []string
-	for _, rt := range newRouter(&fakeJobs{}).Routes() {
+	for _, rt := range newRouter(nil).Routes() {
 		if docsPaths[rt.Path] {
 			continue
 		}
@@ -49,7 +54,7 @@ func TestOpenAPISpecMatchesRoutes(t *testing.T) {
 }
 
 func TestServesOpenAPISpecAndSwaggerUI(t *testing.T) {
-	r := newRouter(&fakeJobs{})
+	r := newRouter(nil)
 
 	rec := get(r, "/openapi.yaml")
 	if rec.Code != http.StatusOK || rec.Body.String() != string(api.OpenAPISpec) {
@@ -63,4 +68,10 @@ func TestServesOpenAPISpecAndSwaggerUI(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `url: "/openapi.yaml"`) {
 		t.Fatalf("GET /swagger/ = %d, want Swagger UI pointing at /openapi.yaml:\n%s", rec.Code, rec.Body)
 	}
+}
+
+func get(r http.Handler, path string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	return rec
 }

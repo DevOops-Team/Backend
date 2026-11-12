@@ -1,8 +1,9 @@
 // Command api is the DevOops training backend.
 //
-// It takes a JSON job request from the frontend, writes config.json and jobset.json to S3, and
-// submits the rendered JobSet to the local k3s management cluster, where MultiKueue dispatches
-// it to whichever EKS worker admits it first.
+// It takes a multipart job submission from the frontend (settings + a Hugging Face model folder +
+// jsonl training data), streams the files to S3, writes config.json and jobset.json, creates the
+// fencing item and submits the JobSet to the management cluster, where Kueue · MultiKueue and the
+// dispatcher send it to an EKS worker. It reports job.submitted to Kafka.
 //
 // main only wires dependencies: config → repository → service → handler.
 package main
@@ -50,7 +51,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	jobSettings = jobSettings.WithCheckpointImage(cfg.CheckpointImage)
+	jobSettings = jobSettings.WithImages(cfg.TrainerImage, cfg.CheckpointImage)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -64,26 +65,35 @@ func run() error {
 		return err
 	}
 	db := dynamodb.NewFromConfig(awsCfg)
-	events := repository.NewEvents(db, cfg.EventsTable)
+	lifecycle, err := repository.NewLifecycle(cfg.KafkaBootstrap, cfg.KafkaTopic)
+	if err != nil {
+		return err
+	}
+	defer lifecycle.Close()
+	timelineStore := repository.NewTimeline(500)
 
 	jobs := service.NewJobService(service.Config{
-		Namespace:     cfg.Namespace,
-		Region:        cfg.Region,
-		Bucket:        cfg.Bucket,
-		ProgressTable: cfg.ProgressTable,
-		Settings:      jobSettings,
-		NewID:         newID,
-	},
-		repository.NewObjects(s3.NewFromConfig(awsCfg), cfg.Bucket),
-		kube,
-		repository.NewProgress(db, cfg.ProgressTable),
-		events, // 실행 기록 읽기. Kafka로 옮기면 이 인자만 바꾼다.
-		events, // 백엔드가 남기는 기록 쓰기
-	)
+		Namespace:      cfg.Namespace,
+		Region:         cfg.Region,
+		Bucket:         cfg.Bucket,
+		FencingTable:   cfg.FencingTable,
+		ProgressTable:  cfg.ProgressTable,
+		KafkaBootstrap: cfg.KafkaBootstrap,
+		KafkaTopic:     cfg.KafkaTopic,
+		Settings:       jobSettings,
+		NewID:          newID,
+	}, service.Deps{
+		Objects:   repository.NewObjects(s3.NewFromConfig(awsCfg), cfg.Bucket),
+		Scheduler: kube,
+		Progress:  repository.NewProgress(db, cfg.ProgressTable),
+		Fencing:   repository.NewFencing(db, cfg.FencingTable),
+		Lifecycle: lifecycle,
+		Events:    timelineStore,
+		Record:    timelineStore,
+	})
 
-	// Management-cluster steps (Kueue quota, MultiKueue dispatch, finish). Worker steps come from
-	// the job-watcher on each EKS cluster.
-	go timeline.NewTracker(kube, events, model.ManagerCluster).Run(ctx, 2*time.Second)
+	// Management-cluster steps (Kueue quota, MultiKueue dispatch, finish) for the job timeline.
+	go timeline.NewTracker(kube, timelineStore, model.ManagerCluster).Run(ctx, 2*time.Second)
 
 	gin.SetMode(gin.ReleaseMode)
 	srv := &http.Server{
@@ -101,7 +111,8 @@ func run() error {
 		}
 	}()
 
-	slog.Info("listening", "addr", srv.Addr, "bucket", cfg.Bucket, "namespace", cfg.Namespace)
+	slog.Info("listening", "addr", srv.Addr, "bucket", cfg.Bucket, "namespace", cfg.Namespace,
+		"trainer", jobSettings.Images.Trainer, "checkpoint", jobSettings.Images.Checkpoint, "kafka", cfg.KafkaBootstrap)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

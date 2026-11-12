@@ -11,8 +11,6 @@ DynamoDB 지연이 학습 step을 막지 않는다.
 import json
 import os
 import signal
-import subprocess
-import sys
 import time
 from decimal import Decimal
 
@@ -44,14 +42,7 @@ def read_progress():
 
 
 def open_table():
-    # 기본 이미지에 boto3가 없다. 진행 파일이 처음 생겼을 때 설치한다.
-    for attempt in range(1, 6):
-        r = subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", "boto3"])
-        if r.returncode == 0:
-            break
-        log(f"pip install boto3 failed (attempt {attempt})")
-        time.sleep(5)
-    import boto3
+    import boto3  # checkpoint(ckpt-agent) 이미지에 들어 있다
 
     return boto3.resource("dynamodb", region_name=REGION).Table(TABLE)
 

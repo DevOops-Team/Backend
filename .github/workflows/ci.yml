@@ -1,6 +1,7 @@
 # 협업 규칙 §7 CI 파이프라인.
 #   PR(→ develop, → main), develop push : 린트(Go · OpenAPI) · 테스트 · 빌드 + 이미지 빌드 (push 안 함)
 #   main push(머지)             : 같은 검사 → 이미지 push  ghcr.io/devoops-team/backend:{main, sha-<7자리>}
+#   trainer 이미지(ghcr.io/devoops-team/trainer)는 trainer/가 바뀐 경우에만 빌드한다 (PyTorch 베이스가 커서)
 name: CI
 
 on:
@@ -36,6 +37,8 @@ jobs:
         run: npx --yes @redocly/cli@2.11.0 lint api/openapi.yaml
       - name: test
         run: go test -race ./...
+      - name: trainer test
+        run: python3 -m unittest trainer/test_train.py
       - name: build
         run: go build ./...
 
@@ -80,6 +83,71 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  trainer-changes:
+    name: trainer changed?
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git diff --name-only "$BASE" HEAD | grep -qE '^(trainer/|\.github/workflows/ci\.yml$)'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  trainer-image:
+    name: trainer image
+    needs: [check, trainer-changes]
+    if: needs.trainer-changes.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ghcr.io/devoops-team/trainer
+      digest: ${{ steps.build.outputs.digest }}
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TRAINER_IMAGE: ghcr.io/devoops-team/trainer
+      PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Free disk space (PyTorch CUDA base is large)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        if: env.PUSH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.TRAINER_IMAGE }}
+          tags: |
+            type=raw,value=main
+            type=sha,prefix=sha-,format=short
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: trainer
+          file: trainer/Dockerfile
+          platforms: linux/amd64
+          push: ${{ env.PUSH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
   # GPU-114 · ADR-23: main 이미지 digest를 Gitops overlay에 반영한다.
   # 로직은 Gitops 재사용 워크플로 한 곳에 있다. 값은 Variables(DEPLOY_APP_ID · GITOPS_REPO · GITOPS_OVERLAY)와
   # Secret(DEPLOY_APP_PRIVATE_KEY)에서 받고, digest는 image job 출력을 쓴다.
@@ -91,6 +159,21 @@ jobs:
     with:
       image: ${{ needs.image.outputs.image }}
       digest: ${{ needs.image.outputs.digest }}
+      overlay: ${{ vars.GITOPS_OVERLAY }}
+      app-id: ${{ vars.DEPLOY_APP_ID }}
+      gitops-repo: ${{ vars.GITOPS_REPO }}
+    secrets:
+      app-private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+
+  # trainer 이미지 digest도 같은 backend overlay(images:)에 반영 → Backend env TRAINER_IMAGE
+  trainer-deploy:
+    name: gitops deploy trainer
+    needs: trainer-image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: DevOops-Team/Gitops/.github/workflows/update-image.yml@main
+    with:
+      image: ${{ needs.trainer-image.outputs.image }}
+      digest: ${{ needs.trainer-image.outputs.digest }}
       overlay: ${{ vars.GITOPS_OVERLAY }}
       app-id: ${{ vars.DEPLOY_APP_ID }}
       gitops-repo: ${{ vars.GITOPS_REPO }}
