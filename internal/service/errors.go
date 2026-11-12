@@ -14,7 +14,8 @@ const (
 	KindNotFound                      // no such job, dataset or file (404)
 	KindConflict                      // the JobSet already exists (409)
 	KindUnprocessable                 // dataset format the model does not read (422)
-	KindUpstream                      // S3, k3s or DynamoDB failed (502)
+	KindUpstream                      // S3, the management cluster or DynamoDB failed (502)
+	KindTooLarge                      // the upload is over a limit (413)
 )
 
 func (k Kind) String() string {
@@ -61,6 +62,8 @@ func (e *Error) ErrorCode() string {
 		return "DATASET_FORMAT_MISMATCH"
 	case KindUpstream:
 		return "UPSTREAM"
+	case KindTooLarge:
+		return "TOO_LARGE"
 	}
 	return ""
 }
@@ -70,6 +73,8 @@ func invalid(msg string) error { return &Error{Kind: KindInvalid, Msg: msg} }
 func invalidFields(fields []model.FieldError) error {
 	return &Error{Kind: KindInvalid, Msg: "invalid request: " + fields[0].Field + ": " + fields[0].Message, Fields: fields}
 }
+
+func tooLarge(msg string) error { return &Error{Kind: KindTooLarge, Msg: msg} }
 
 func notFound(msg string) error { return &Error{Kind: KindNotFound, Msg: msg} }
 

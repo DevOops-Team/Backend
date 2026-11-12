@@ -20,7 +20,7 @@ var progressReporter string
 func progressSidecar(in Input, generation string) map[string]any {
 	return map[string]any{
 		"name":          ProgressSidecarName,
-		"image":         in.Settings.Images.ProgressReporter,
+		"image":         in.Settings.Images.Checkpoint, // ckpt-agent image: Python + boto3 already inside
 		"restartPolicy": "Always",
 		"command":       []any{"python", "-u", "-c"},
 		"args":          []any{progressReporter},
@@ -36,8 +36,8 @@ func progressSidecar(in Input, generation string) map[string]any {
 				"valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "spec.nodeName"}},
 			},
 		},
-		"volumeMounts": []any{map[string]any{"name": progressVolume, "mountPath": progressDir}},
-		// Kueue counts these in the quota (cpu 7 for two pods of 3 cpu) and they must fit next to the trainer.
+		"volumeMounts": []any{mount(progressVolume, progressDir, false)},
+		// Kueue counts native sidecars in the quota, and they must fit next to the trainer on g4dn.xlarge.
 		"resources": map[string]any{
 			"requests": map[string]any{"cpu": "50m", "memory": "128Mi"},
 			"limits":   map[string]any{"memory": "128Mi"},

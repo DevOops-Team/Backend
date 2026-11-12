@@ -3,9 +3,12 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -13,8 +16,8 @@ import (
 	"github.com/DevOops-Team/Backend/internal/service"
 )
 
-// maxRequestBytes caps a job submission; it is a small JSON document.
-const maxRequestBytes = 1 << 20
+// maxSpecBytes caps the "spec" part, a small JSON document.
+const maxSpecBytes = 64 << 10
 
 type jobHandler struct {
 	jobs JobService
@@ -22,22 +25,56 @@ type jobHandler struct {
 
 func healthz(c *gin.Context) { c.String(http.StatusOK, "ok") }
 
-// create handles POST /api/jobs. Unknown top-level keys are errors, so a typo in a field name
-// cannot silently fall back to a default.
+func (h *jobHandler) options(c *gin.Context) {
+	c.JSON(http.StatusOK, h.jobs.Options())
+}
+
+// create handles the multipart POST /api/jobs: first the "spec" JSON part, then the model folder
+// ("model/<folder>/<path>") and the training data ("data/<file>.jsonl") as file parts. The parts are
+// streamed to the service one by one, so the request body is never held in memory or on disk.
 func (h *jobHandler) create(c *gin.Context) {
-	dec := json.NewDecoder(http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBytes))
-	dec.DisallowUnknownFields()
-	var req model.SubmitJobRequest
-	if err := dec.Decode(&req); err != nil {
-		c.JSON(http.StatusBadRequest, model.ErrorResponse{Error: "invalid JSON body: " + err.Error(), Code: "VALIDATION"})
+	mr, err := c.Request.MultipartReader()
+	if err != nil {
+		bad(c, "multipart/form-data body required: "+err.Error())
 		return
 	}
-	created, err := h.jobs.Submit(c.Request.Context(), req)
+	first, err := mr.NextPart()
+	if err != nil || first.FormName() != "spec" {
+		bad(c, `the first part must be "spec" (JSON)`)
+		return
+	}
+	dec := json.NewDecoder(io.LimitReader(first, maxSpecBytes))
+	dec.DisallowUnknownFields()
+	var spec model.SubmitSpec
+	if err := dec.Decode(&spec); err != nil {
+		bad(c, "invalid spec JSON: "+err.Error())
+		return
+	}
+	created, err := h.jobs.Submit(c.Request.Context(), spec, &partSource{r: mr})
 	if err != nil {
 		fail(c, err)
 		return
 	}
 	c.JSON(http.StatusCreated, created)
+}
+
+// partSource turns multipart parts into uploads. The path rides in the form name, because
+// Part.FileName() keeps only the base name and a model folder has subdirectories.
+type partSource struct {
+	r *multipart.Reader
+}
+
+func (p *partSource) Next() (service.Upload, error) {
+	part, err := p.r.NextPart()
+	if err != nil {
+		return service.Upload{}, err // io.EOF after the last part
+	}
+	field, path, _ := strings.Cut(part.FormName(), "/")
+	return service.Upload{Field: field, Path: path, Body: part}, nil
+}
+
+func bad(c *gin.Context, msg string) {
+	c.JSON(http.StatusBadRequest, model.ErrorResponse{Error: msg, Code: "VALIDATION"})
 }
 
 func (h *jobHandler) list(c *gin.Context) {
@@ -81,48 +118,6 @@ func (h *jobHandler) file(c *gin.Context) {
 	writeContent(c, content, err)
 }
 
-func (h *jobHandler) models(c *gin.Context) {
-	models, err := h.jobs.Models(c.Request.Context())
-	if err != nil {
-		fail(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, model.ItemList[model.Model]{Items: models})
-}
-
-func (h *jobHandler) modelFile(c *gin.Context) {
-	content, err := h.jobs.ModelFile(c.Request.Context(), c.Param("name"), c.Param("file"))
-	writeContent(c, content, err)
-}
-
-func (h *jobHandler) datasets(c *gin.Context) {
-	datasets, err := h.jobs.Datasets(c.Request.Context())
-	if err != nil {
-		fail(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, model.ItemList[model.Dataset]{Items: datasets})
-}
-
-func (h *jobHandler) dataset(c *gin.Context) {
-	dataset, err := h.jobs.Dataset(c.Request.Context(), c.Param("id"))
-	if err != nil {
-		fail(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, dataset)
-}
-
-func (h *jobHandler) datasetFile(c *gin.Context) {
-	version, err := strconv.Atoi(c.Param("version"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, model.ErrorResponse{Error: "version must be an integer", Code: "VALIDATION"})
-		return
-	}
-	content, err := h.jobs.DatasetFile(c.Request.Context(), c.Param("id"), version, c.Param("name"))
-	writeContent(c, content, err)
-}
-
 // writeContent returns the start of one file as text. X-Truncated and X-Total-Size tell the viewer
 // when it is not the whole file.
 func writeContent(c *gin.Context, content model.FileContent, err error) {
@@ -153,6 +148,8 @@ func fail(c *gin.Context, err error) {
 		status = http.StatusConflict
 	case service.KindUnprocessable:
 		status = http.StatusUnprocessableEntity
+	case service.KindTooLarge:
+		status = http.StatusRequestEntityTooLarge
 	case service.KindUpstream:
 		status = http.StatusBadGateway
 		slog.Error(se.Msg, "path", c.Request.URL.Path)

@@ -1,26 +1,24 @@
 openapi: 3.0.3
 info:
   title: DevOops Backend API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     학습 작업을 제출하고 진행 상태를 보는 API. Confluence `서비스 API 명세`를 따른다.
 
-    - 프론트는 모델 · 데이터셋 목록의 기본값으로 요청을 채워 `POST /api/jobs`로 제출한다. 기본값과 범위는 `GET /api/models`가 준다.
+    - 프론트는 로컬의 Hugging Face 모델 폴더 · jsonl 학습 데이터와 설정을 `POST /api/jobs`(multipart)로 제출한다. 기본값과 범위는 `GET /api/training/options`가 준다.
     - 필드 이름은 camelCase다. `hyperparameters` · `config` 안은 config.json 키 그대로 snake_case다.
-    - 오류 응답은 `{"error", "code", "fields"}`다. 400은 입력 오류, 502는 S3 · k3s · DynamoDB 오류다.
+    - 오류 응답은 `{"error", "code", "fields"}`다. 400은 입력 오류, 413은 업로드 상한 초과, 502는 S3 · 관리 클러스터 · DynamoDB 오류다.
     - 이 파일은 손으로 관리한다. 라우트를 바꾸면 `internal/handler/router.go`와 함께 고친다(테스트가 Gin 라우트와 이 파일을 비교한다).
 
-    **임시 구성 (FSDP 연동 테스트)**: 서비스 DB가 없어 상태는 k3s, 설정은 S3, 나머지는 JobSet 어노테이션에서 읽는다. 데이터셋은 등록 API 없이 S3의 `manifest.json`에서 읽는다.
-    목록의 `limit` · `cursor`, `generations`, `cancel`은 아직 없다. 모델 파일 목록과 두 미리보기 API는 화면에서 내용을 보기 위해 명세에 더했다.
+    서비스 DB가 없어 상태는 관리 클러스터(Kueue · JobSet), 설정은 S3, 나머지는 JobSet 어노테이션에서 읽는다. 제출 기록은 Kafka `job.lifecycle`(`job.submitted`)로 보낸다.
+    목록의 `limit` · `cursor`, `generations`, `cancel`은 아직 없다.
 servers:
   - url: /
 # 인증 없음 (로컬 · 데모용). 인증이 생기면 securitySchemes와 함께 바꾼다.
 security: []
 tags:
-  - name: models
-    description: 학습 모델
-  - name: datasets
-    description: 학습 데이터
+  - name: training
+    description: 제출 화면이 고를 수 있는 값
   - name: jobs
     description: 작업 제출 · 조회
   - name: files
@@ -41,105 +39,17 @@ paths:
             text/plain:
               schema: { type: string, example: ok }
 
-  /api/models:
+  /api/training/options:
     get:
-      tags: [models]
-      summary: 모델 · 방식 · GPU 범위 · 하이퍼파라미터 정의와 S3의 모델 파일
-      operationId: listModels
+      tags: [training]
+      summary: 방식 · GPU 범위 · 하이퍼파라미터 정의 · 업로드 상한 · 체크포인트 계산 기본값
+      operationId: getTrainingOptions
       responses:
         "200":
-          description: 모델 목록
+          description: 제출 화면 옵션
           content:
             application/json:
-              schema:
-                type: object
-                required: [items, nextCursor]
-                properties:
-                  items:
-                    type: array
-                    items: { $ref: "#/components/schemas/Model" }
-                  nextCursor: { type: string, nullable: true }
-        "502": { $ref: "#/components/responses/BadGateway" }
-
-  /api/models/{name}/files/{file}:
-    get:
-      tags: [models]
-      summary: 모델 파일 내용 (앞 64KiB)
-      operationId: getModelFile
-      parameters:
-        - name: name
-          in: path
-          required: true
-          schema: { type: string, example: gpt2 }
-        - name: file
-          in: path
-          required: true
-          description: 파일명 (경로 구분자 없이)
-          schema: { type: string, example: config.json }
-      responses:
-        "200": { $ref: "#/components/responses/FileText" }
-        "400": { $ref: "#/components/responses/BadRequest" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "502": { $ref: "#/components/responses/BadGateway" }
-
-  /api/datasets:
-    get:
-      tags: [datasets]
-      summary: 데이터셋 목록
-      operationId: listDatasets
-      responses:
-        "200":
-          description: 데이터셋 목록 (versions 제외)
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items, nextCursor]
-                properties:
-                  items:
-                    type: array
-                    items: { $ref: "#/components/schemas/Dataset" }
-                  nextCursor: { type: string, nullable: true }
-        "502": { $ref: "#/components/responses/BadGateway" }
-
-  /api/datasets/{id}:
-    get:
-      tags: [datasets]
-      summary: 데이터셋 상세 + 버전 · 파일 목록
-      operationId: getDataset
-      parameters:
-        - $ref: "#/components/parameters/DatasetID"
-      responses:
-        "200":
-          description: 데이터셋
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Dataset" }
-        "400": { $ref: "#/components/responses/BadRequest" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "502": { $ref: "#/components/responses/BadGateway" }
-
-  /api/datasets/{id}/versions/{version}/files/{name}:
-    get:
-      tags: [datasets]
-      summary: 데이터 파일 내용 (앞 64KiB)
-      operationId: getDatasetFile
-      parameters:
-        - $ref: "#/components/parameters/DatasetID"
-        - name: version
-          in: path
-          required: true
-          schema: { type: integer, minimum: 1, example: 1 }
-        - name: name
-          in: path
-          required: true
-          description: 파일명 (경로 구분자 없이)
-          schema: { type: string, example: train-000.jsonl }
-      responses:
-        "200": { $ref: "#/components/responses/FileText" }
-        "400": { $ref: "#/components/responses/BadRequest" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "502": { $ref: "#/components/responses/BadGateway" }
+              schema: { $ref: "#/components/schemas/TrainingOptions" }
 
   /api/jobs:
     post:
@@ -147,12 +57,24 @@ paths:
       summary: 작업 제출
       operationId: createJob
       description: |
-        검증(실패하면 아무것도 쓰지 않음) → 프로파일 기본값 + 사용자 값 병합 → S3 `code/{id}/config.json` · `train.py` · `jobset.json` 저장 → k3s에 JobSet 제출.
+        multipart/form-data. 첫 파트는 `spec`(JSON), 이어서 파일 파트를 보낸다. 파일 경로는 파트 **이름**에 넣는다(파일명은 기본 이름만 남기 때문).
+        - `model/<폴더명>/<폴더 안 경로>`: Hugging Face 모델 폴더의 파일 전부 (`config.json` 필수, 한 폴더만)
+        - `data/<파일명>.jsonl`: 학습 데이터 (한 줄에 `{"text": ...}`), 1개 이상
+
+        처리: spec 검증(실패하면 아무것도 읽지 · 쓰지 않음) → 파일을 S3 `datasets/{id}/v1/{model,data}/`로 스트리밍(sha256 · 크기 계산, 상한 초과 시 413) → `manifest.json` → 체크포인트 간격 계산(Young/Daly) → `code/{id}/config.json` · `jobset.json` → DynamoDB 펜싱 첫 항목 → JobSet 제출 → Kafka `job.submitted`(최선 노력).
       requestBody:
         required: true
         content:
-          application/json:
-            schema: { $ref: "#/components/schemas/SubmitJobRequest" }
+          multipart/form-data:
+            schema:
+              type: object
+              required: [spec]
+              properties:
+                spec: { $ref: "#/components/schemas/SubmitSpec" }
+              additionalProperties:
+                type: string
+                format: binary
+                description: "`model/<폴더>/<경로>` 또는 `data/<파일>.jsonl`"
       responses:
         "201":
           description: 제출됨
@@ -160,14 +82,13 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CreatedJob" }
         "400": { $ref: "#/components/responses/BadRequest" }
-        "404": { $ref: "#/components/responses/NotFound" }
         "409":
-          description: 같은 JobSet 이름이 이미 있음
+          description: 같은 JobSet 이름 · 펜싱 항목이 이미 있음
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-        "422":
-          description: 모델이 받지 않는 데이터 형식
+        "413":
+          description: 업로드 상한(모델 · 데이터 바이트, 파일 수) 초과
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -176,7 +97,7 @@ paths:
       tags: [jobs]
       summary: 작업 목록 (최신순)
       operationId: listJobs
-      description: k3s의 JobSet · Workload 상태에 DynamoDB 진행 상태를 합친다. DynamoDB 조회가 실패해도 큐 상태는 돌려준다(`progress`가 null).
+      description: 관리 클러스터의 JobSet · Workload 상태에 DynamoDB 진행 상태를 합친다. DynamoDB 조회가 실패해도 큐 상태는 돌려준다(`progress`가 null).
       responses:
         "200":
           description: 작업 목록
@@ -214,7 +135,7 @@ paths:
       tags: [jobs]
       summary: 전달 타임라인 (시간순)
       operationId: listJobEvents
-      description: 작업이 GPU까지 가는 동안 거친 단계. k3s 단계는 백엔드가, EKS 단계는 각 워커의 job-watcher가 DynamoDB `devoops-job-events`에 쓴다.
+      description: 작업이 GPU까지 가는 동안 거친 단계. 온프레 관리 클러스터(`onprem`) 단계는 백엔드가 Kubernetes Event · Kueue Workload에서 모은다.
       parameters:
         - $ref: "#/components/parameters/JobID"
       responses:
@@ -277,11 +198,6 @@ components:
       required: true
       description: 작업 ID (백엔드가 만든 8자리 hex)
       schema: { type: string, pattern: "^[0-9a-z]+$", example: 3f9a1c2e }
-    DatasetID:
-      name: id
-      in: path
-      required: true
-      schema: { type: string, pattern: "^ds-[a-z0-9-]+$", example: ds-tiny-shakespeare }
 
   responses:
     FileText:
@@ -313,7 +229,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     BadGateway:
-      description: S3 · k3s · DynamoDB 오류
+      description: S3 · 관리 클러스터 · DynamoDB 오류
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -326,7 +242,7 @@ components:
         error: { type: string }
         code:
           type: string
-          enum: [VALIDATION, NOT_FOUND, ALREADY_EXISTS, DATASET_FORMAT_MISMATCH, SUBMIT_FAILED, UPSTREAM, INTERNAL]
+          enum: [VALIDATION, NOT_FOUND, ALREADY_EXISTS, TOO_LARGE, SUBMIT_FAILED, UPSTREAM, INTERNAL]
         fields:
           type: array
           items:
@@ -349,33 +265,22 @@ components:
           example: [1, 2, 4]
         default: { type: integer, description: 입력하지 않았을 때 프론트가 보내는 값 }
 
-    StoredFile:
+    TrainingOptions:
       type: object
-      required: [name, size]
+      required: [strategies, defaultStrategy, gpus, datasetFormat, hyperparameters, limits, checkpoint]
       properties:
-        name: { type: string }
-        size: { type: integer, format: int64 }
-        sha256: { type: string }
-
-    Model:
-      type: object
-      required: [name, displayName, strategies, defaultStrategy, gpus, datasetFormats, hyperparameters, uri, files]
-      properties:
-        name: { type: string, example: gpt2 }
-        displayName: { type: string, example: GPT-2 small }
         strategies:
           type: array
-          items: { type: string, example: fsdp }
+          items:
+            type: object
+            required: [name, minGpus, checkpointFormat]
+            properties:
+              name: { type: string, example: fsdp }
+              minGpus: { type: integer, example: 2 }
+              checkpointFormat: { type: string, example: fsdp-dcp }
         defaultStrategy: { type: string, example: fsdp }
-        strategyMinGpus:
-          type: object
-          description: 방식별 최소 GPU 수
-          additionalProperties: { type: integer }
-          example: { fsdp: 2, ddp: 1 }
         gpus: { $ref: "#/components/schemas/GPURange" }
-        datasetFormats:
-          type: array
-          items: { type: string, example: text-jsonl }
+        datasetFormat: { type: string, example: text-jsonl }
         hyperparameters:
           type: array
           items:
@@ -385,67 +290,48 @@ components:
               key: { type: string, example: epochs }
               level: { type: string, enum: [basic, advanced] }
               type: { type: string, enum: [integer, number] }
-              default: { type: number, example: 10 }
+              nullable: { type: boolean, description: "null을 보내면 기본값을 지운다 (max_steps)" }
+              default: { type: number, nullable: true, example: 10 }
               min: { type: number }
               exclusiveMin: { type: number }
               max: { type: number }
-        uri: { type: string, example: "s3://devoops-ml-example/datasets/_shared/models/gpt2/" }
-        files:
-          type: array
-          items: { $ref: "#/components/schemas/StoredFile" }
-
-    Dataset:
-      type: object
-      required: [id, name, format, latestVersion]
-      properties:
-        id: { type: string, example: ds-tiny-shakespeare }
-        name: { type: string, example: Tiny Shakespeare }
-        format: { type: string, example: text-jsonl }
-        latestVersion: { type: integer, example: 1 }
-        versions:
-          type: array
-          description: 상세에만 있다
-          items:
-            type: object
-            required: [version, source, uri, fileCount, totalBytes, manifestSha256, files]
-            properties:
-              version: { type: integer }
-              source: { type: string, example: seed }
-              uri: { type: string }
-              fileCount: { type: integer }
-              totalBytes: { type: integer, format: int64 }
-              manifestSha256: { type: string }
-              files:
-                type: array
-                items: { $ref: "#/components/schemas/StoredFile" }
-
-    SubmitJobRequest:
-      type: object
-      required: [model, gpus, dataset]
-      additionalProperties: false
-      properties:
-        name: { type: string, description: "1~63자, 소문자 · 숫자 · `-`. 없으면 `{model}-{id}`", example: gpt2-demo }
-        model: { type: string, example: gpt2 }
-        strategy: { type: string, description: 없으면 모델의 defaultStrategy, example: fsdp }
-        gpus: { type: integer, example: 2 }
-        dataset:
+        limits:
           type: object
-          required: [id, version]
+          required: [maxModelBytes, maxDataBytes, maxFiles]
           properties:
-            id: { type: string, example: ds-tiny-shakespeare }
-            version: { type: integer, example: 1 }
+            maxModelBytes: { type: integer, format: int64 }
+            maxDataBytes: { type: integer, format: int64 }
+            maxFiles: { type: integer }
+        checkpoint:
+          type: object
+          description: "간격 미리보기용. τ = √(2·C·M), C = 모델 바이트 · sizeFactor / writeBytesPerSecond, 최소 minIntervalSeconds"
+          required: [sizeFactor, writeBytesPerSecond, mtbfSeconds, minIntervalSeconds]
+          properties:
+            sizeFactor: { type: number, example: 3 }
+            writeBytesPerSecond: { type: number, example: 100000000 }
+            mtbfSeconds: { type: number, example: 21600 }
+            minIntervalSeconds: { type: number, example: 300 }
+
+    SubmitSpec:
+      type: object
+      additionalProperties: false
+      required: [gpus]
+      properties:
+        name: { type: string, description: "1~63자, 소문자 · 숫자 · `-`. 없으면 `{모델 폴더명}-{id}`", example: gpt2-demo }
+        strategy: { type: string, description: 없으면 defaultStrategy, example: fsdp }
+        gpus: { type: integer, example: 2 }
         hyperparameters:
           type: object
-          description: 모델이 연 키만. 비우면 프로파일 기본값
+          description: options의 hyperparameters 키만. 비우면 기본값
           additionalProperties: true
-          example: {}
+          example: { epochs: 3 }
 
     TrainConfig:
       type: object
       description: 최종 config.json. 키는 snake_case 그대로다.
-      required: [schema_version, model, training_mode, checkpoint_format, dataset, epochs, max_steps, batch_size_per_gpu, learning_rate, warmup_steps, checkpoint_every_steps, seed, world_size]
+      required: [schema_version, model, training_mode, checkpoint_format, dataset, epochs, max_steps, batch_size_per_gpu, learning_rate, warmup_steps, seed, world_size, checkpoint_policy]
       properties:
-        schema_version: { type: integer, example: 1 }
+        schema_version: { type: integer, example: 2 }
         model: { type: string, example: gpt2 }
         training_mode: { type: string, example: fsdp }
         checkpoint_format: { type: string, example: fsdp-dcp }
@@ -461,9 +347,17 @@ components:
         batch_size_per_gpu: { type: integer, example: 4 }
         learning_rate: { type: number, example: 0.00003 }
         warmup_steps: { type: integer, example: 100 }
-        checkpoint_every_steps: { type: integer, nullable: true, example: 250 }
         seed: { type: integer, example: 42 }
         world_size: { type: integer, example: 2 }
+        checkpoint_policy:
+          type: object
+          description: "Young/Daly 간격. train.py가 처음 warmup_measure_steps step의 시간을 재서 step 간격으로 바꾼다"
+          required: [interval_seconds, estimated_save_seconds, mtbf_seconds, warmup_measure_steps]
+          properties:
+            interval_seconds: { type: number, example: 844 }
+            estimated_save_seconds: { type: number, example: 16.5 }
+            mtbf_seconds: { type: number, example: 21600 }
+            warmup_measure_steps: { type: integer, example: 20 }
 
     CreatedJob:
       type: object
@@ -474,7 +368,7 @@ components:
         status: { $ref: "#/components/schemas/Status" }
         generation: { type: integer, example: 1 }
         jobsetName: { type: string, example: job-3f9a1c2e-g0001 }
-        queue: { type: string, example: queue-auto }
+        queue: { type: string, example: queue-light }
         config: { $ref: "#/components/schemas/TrainConfig" }
         configSha256: { type: string }
         createdAt: { type: string, format: date-time }
@@ -488,7 +382,7 @@ components:
       type: string
       enum: [Pending, Admitted, Running, Succeeded, Failed]
       description: |
-        현재 세대의 k3s 상태.
+        현재 세대의 관리 클러스터 상태.
         - Pending: 큐에서 승인 대기
         - Admitted: 워커가 쿼터를 잡음
         - Running: active Pod가 있음
@@ -553,7 +447,7 @@ components:
         key: { type: string, description: "정렬 키 `<시각 ms UTC>#<클러스터>#<ID>`. 반복 이벤트는 같은 키를 덮어쓴다" }
         time: { type: string, format: date-time, description: 처음 본 시각 }
         lastTime: { type: string, format: date-time, description: 마지막으로 본 시각 }
-        cluster: { type: string, description: "`k3s` 또는 EKS 워커 이름" }
+        cluster: { type: string, description: "`onprem`(온프레 관리 클러스터) 또는 EKS 워커 이름" }
         source: { type: string, description: "backend, kueue-admission, multikueue, jobset, default-scheduler, karpenter, kubelet, ..." }
         reason: { type: string }
         message: { type: string }
@@ -565,6 +459,6 @@ components:
       type: object
       required: [kind, name, size]
       properties:
-        kind: { type: string, enum: [code, data], description: "code = config.json · jobset.json · train.py, data = 데이터 manifest.json" }
+        kind: { type: string, enum: [code, data], description: "code = config.json · jobset.json, data = 업로드한 파일의 manifest.json" }
         name: { type: string }
         size: { type: integer, format: int64 }

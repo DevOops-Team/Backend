@@ -20,7 +20,7 @@ const (
 	DatasetAnnotation      = "devoops/dataset" // "<id>/v<version>"
 	ConfigSHA256Annotation = "devoops/config-sha256"
 
-	// 임시 구성: 서비스 DB가 없어서 작업 이름과 사용자가 바꾼 값도 JobSet에 남긴다.
+	// 서비스 DB가 없어서 작업 이름과 사용자가 바꾼 값도 JobSet에 남긴다.
 	NameAnnotation            = "devoops/name"
 	HyperparametersAnnotation = "devoops/hyperparameters"
 )

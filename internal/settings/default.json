@@ -1,50 +1,56 @@
 {
-  "service_account": "",
+  "service_account": "trainer",
   "queues": {
     "light": { "name": "queue-light", "gpus": [1, 2] },
     "heavy": { "name": "queue-heavy", "gpus": [3, 4] }
   },
-  "priority_classes": { "training": "" },
-  "images": {
-    "trainer": "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime",
-    "progress_reporter": "public.ecr.aws/docker/library/python:3.12-slim"
-  },
+  "priority_classes": { "training": "training" },
   "pod": {
     "cpu_request": "3",
     "memory_request": "12Gi",
     "memory_limit": "14Gi",
     "shm_size": "2Gi",
-    "ckpt_local_size": "40Gi",
+    "data_size": "40Gi",
+    "ckpt_size": "40Gi",
     "termination_grace_seconds": 60,
-    "master_port": 29500
+    "master_port": 29500,
+    "run_as_user": 1000
   },
   "strategies": {
     "fsdp": { "checkpoint_format": "fsdp-dcp", "min_gpus": 2 },
     "ddp": { "checkpoint_format": "ddp-pt", "min_gpus": 1 }
   },
-  "train_script_key": "code/_shared/train.py",
-  "model_profiles": {
-    "gpt2": {
-      "display_name": "GPT-2 small",
-      "model_subpath": "_shared/models/gpt2",
-      "dataset_formats": ["text-jsonl"],
-      "strategies": ["fsdp", "ddp"],
-      "default_strategy": "fsdp",
-      "gpus": { "min": 1, "max": 2, "default": 2, "options": [1, 2, 4] },
-      "defaults": {
-        "epochs": 10,
-        "max_steps": null,
-        "batch_size_per_gpu": 4,
-        "learning_rate": 3e-05,
-        "warmup_steps": 100,
-        "checkpoint_every_steps": 250,
-        "seed": 42
-      },
-      "hyperparameters": [
-        { "key": "epochs", "level": "basic", "type": "integer", "min": 1, "max": 20 },
-        { "key": "batch_size_per_gpu", "level": "advanced", "type": "integer", "min": 1, "max": 8 },
-        { "key": "learning_rate", "level": "advanced", "type": "number", "exclusive_min": 0, "max": 0.01 }
-      ]
-    }
+  "training": {
+    "dataset_format": "text-jsonl",
+    "default_strategy": "fsdp",
+    "gpus": { "min": 1, "max": 2, "default": 2, "options": [1, 2, 4] },
+    "defaults": {
+      "epochs": 10,
+      "max_steps": null,
+      "batch_size_per_gpu": 4,
+      "learning_rate": 3e-05,
+      "warmup_steps": 100,
+      "seed": 42
+    },
+    "hyperparameters": [
+      { "key": "epochs", "level": "basic", "type": "integer", "min": 1, "max": 100 },
+      { "key": "max_steps", "level": "advanced", "type": "integer", "nullable": true, "min": 1, "max": 10000000 },
+      { "key": "batch_size_per_gpu", "level": "advanced", "type": "integer", "min": 1, "max": 64 },
+      { "key": "learning_rate", "level": "advanced", "type": "number", "exclusive_min": 0, "max": 0.1 },
+      { "key": "warmup_steps", "level": "advanced", "type": "integer", "min": 0, "max": 1000000 },
+      { "key": "seed", "level": "advanced", "type": "integer", "min": 0, "max": 2147483647 }
+    ]
+  },
+  "checkpoint": {
+    "size_factor": 3,
+    "write_bytes_per_second": 100000000,
+    "mtbf_seconds": 21600,
+    "min_interval_seconds": 300,
+    "warmup_measure_steps": 20
+  },
+  "limits": {
+    "max_model_bytes": 2147483648,
+    "max_data_bytes": 1073741824,
+    "max_files": 200
   }
 }

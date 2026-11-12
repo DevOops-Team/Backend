@@ -1,6 +1,6 @@
 // Package timeline turns Kubernetes Events and Kueue Workload status into per-job timeline entries.
 //
-// The same item shape is written by the backend (management cluster, "k3s") and by the job-watcher
+// The same item shape is written by the backend (on-prem management cluster, "onprem") and by the job-watcher
 // on every EKS worker (infra cluster-addons/job_watcher.py), so keep the two in sync:
 //   - job ID: the first "job-<8 hex>" in the involved object's name (pods, jobs, jobsets, workloads)
 //   - sort key: "<time, RFC3339 with ms, UTC>#<cluster>#<id>"; rewriting the same event overwrites it

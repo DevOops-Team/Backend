@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"math"
@@ -22,11 +23,12 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/DevOops-Team/Backend/internal/model"
+	"github.com/DevOops-Team/Backend/internal/service/ckptpolicy"
 	"github.com/DevOops-Team/Backend/internal/service/jobspec"
 	"github.com/DevOops-Team/Backend/internal/settings"
 )
 
-// ObjectStore stores job inputs and reads prepared models and datasets (S3).
+// ObjectStore stores job inputs (S3).
 type ObjectStore interface {
 	Put(ctx context.Context, key string, body io.Reader) error
 	List(ctx context.Context, prefix string) ([]model.ObjectInfo, error)
@@ -34,20 +36,29 @@ type ObjectStore interface {
 	Get(ctx context.Context, key string, limit int64) ([]byte, int64, error)
 }
 
-// Scheduler submits JobSets to the management cluster and reads their queue state (k3s + Kueue).
+// Scheduler submits JobSets to the management cluster and reads their queue state (Kueue).
 type Scheduler interface {
 	// Submit returns model.ErrAlreadyExists when the JobSet name is taken.
 	Submit(ctx context.Context, js *unstructured.Unstructured) error
 	List(ctx context.Context) ([]model.JobStatus, error)
 }
 
-// ProgressStore reads the per-step progress train.py writes (DynamoDB).
+// ProgressStore reads the per-step progress train.py writes (DynamoDB, via progress-reporter).
 type ProgressStore interface {
 	Get(ctx context.Context, jobIDs []string) (map[string]model.Progress, error)
 }
 
-// EventReader reads a job's delivery timeline, oldest first (now DynamoDB; Kafka is planned).
-// To change the source, implement this and pass it in cmd/api/main.go; the service and API stay the same.
+// Fencing creates the job's first fencing item (DynamoDB); model.ErrAlreadyExists if it exists.
+type Fencing interface {
+	Create(ctx context.Context, jobID string) error
+}
+
+// Lifecycle reports the backend's job events to Kafka job.lifecycle.
+type Lifecycle interface {
+	Submitted(ctx context.Context, e model.SubmittedEvent) error
+}
+
+// EventReader reads a job's delivery timeline, oldest first.
 type EventReader interface {
 	List(ctx context.Context, jobID string) ([]model.JobEvent, error)
 }
@@ -57,99 +68,173 @@ type EventWriter interface {
 	Put(ctx context.Context, e model.JobEvent) error
 }
 
+// Upload is one file part of a submission: Field "model" (Path inside the folder, starting with the
+// folder's name) or "data" (a .jsonl file name).
+type Upload struct {
+	Field string
+	Path  string
+	Body  io.Reader
+}
+
+// UploadSource yields the file parts in order; io.EOF after the last one.
+type UploadSource interface {
+	Next() (Upload, error)
+}
+
 const (
 	// MaxPreviewBytes caps how much of one file the viewer gets; datasets can be GBs.
 	MaxPreviewBytes = 64 << 10
 
-	maxMetadataBytes = 4 << 20 // config files, manifests and train.py are small
-	firstGeneration  = 1       // 임시 구성: 복구가 없어 세대는 항상 1이다.
-	configSchema     = 1
+	maxMetadataBytes = 4 << 20 // config files and manifests are small
+	firstGeneration  = 1       // 복구 재제출은 재배치 실행기가 jobset.json으로 한다
+	datasetVersion   = 1       // 업로드는 제출마다 새 데이터셋: datasets/<job id>/v1
+	configSchema     = 2       // 2: checkpoint_policy replaces checkpoint_every_steps; model · data in the dataset
+	manifestSchema   = 1
+	manifestName     = "manifest.json"
+	modelConfigName  = "model/config.json" // every Hugging Face model folder has it
 )
 
 var (
-	validJobID  = regexp.MustCompile(`^[0-9a-z]+$`)
-	validName   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	validDataID = regexp.MustCompile(`^ds-[a-z0-9-]+$`)
-	manifestKey = regexp.MustCompile(`^datasets/(ds-[a-z0-9-]+)/v([0-9]+)/manifest\.json$`)
+	validJobID = regexp.MustCompile(`^[0-9a-z]+$`)
+	validName  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	nameChars  = regexp.MustCompile(`[^a-z0-9-]+`)
 )
 
 type Config struct {
-	Namespace     string
-	Region        string
-	Bucket        string
-	ProgressTable string
-	Settings      settings.Settings
-	NewID         func() string
-	Now           func() time.Time // nil = time.Now
+	Namespace      string
+	Region         string
+	Bucket         string
+	FencingTable   string
+	ProgressTable  string
+	KafkaBootstrap string
+	KafkaTopic     string
+	Settings       settings.Settings
+	NewID          func() string
+	Now            func() time.Time // nil = time.Now
 }
 
 type JobService struct {
-	cfg      Config
-	objects  ObjectStore
-	sched    Scheduler
-	progress ProgressStore
-	events   EventReader
-	record   EventWriter
+	cfg       Config
+	objects   ObjectStore
+	sched     Scheduler
+	progress  ProgressStore
+	fencing   Fencing
+	lifecycle Lifecycle
+	events    EventReader
+	record    EventWriter
 }
 
-func NewJobService(cfg Config, objects ObjectStore, sched Scheduler, progress ProgressStore, events EventReader, record EventWriter) *JobService {
+// Deps are the repositories the service uses.
+type Deps struct {
+	Objects   ObjectStore
+	Scheduler Scheduler
+	Progress  ProgressStore
+	Fencing   Fencing
+	Lifecycle Lifecycle
+	Events    EventReader
+	Record    EventWriter
+}
+
+func NewJobService(cfg Config, d Deps) *JobService {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &JobService{cfg: cfg, objects: objects, sched: sched, progress: progress, events: events, record: record}
+	return &JobService{cfg: cfg, objects: d.Objects, sched: d.Scheduler, progress: d.Progress, fencing: d.Fencing,
+		lifecycle: d.Lifecycle, events: d.Events, record: d.Record}
 }
 
-// Submit validates the request, writes config.json and jobset.json to S3 and creates the JobSet.
-// Validation comes first, so nothing is written for a rejected request.
-func (s *JobService) Submit(ctx context.Context, req model.SubmitJobRequest) (model.CreatedJob, error) {
-	profile, strategy, err := s.validate(req)
+// Options returns what the submit screen may choose.
+func (s *JobService) Options() model.TrainingOptions {
+	st := s.cfg.Settings
+	tr := st.Training
+	names := make([]string, 0, len(st.Strategies))
+	for n := range st.Strategies {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	strategies := make([]model.StrategyOption, 0, len(names))
+	for _, n := range names {
+		strategies = append(strategies, model.StrategyOption{Name: n, MinGPUs: st.Strategies[n].MinGPUs, CheckpointFormat: st.Strategies[n].CheckpointFormat})
+	}
+	defaults := map[string]any{
+		"epochs": tr.Defaults.Epochs, "max_steps": tr.Defaults.MaxSteps, "batch_size_per_gpu": tr.Defaults.BatchSizePerGPU,
+		"learning_rate": tr.Defaults.LearningRate, "warmup_steps": tr.Defaults.WarmupSteps, "seed": tr.Defaults.Seed,
+	}
+	hyper := make([]model.HyperparameterDef, 0, len(tr.Hyperparameters))
+	for _, h := range tr.Hyperparameters {
+		hyper = append(hyper, model.HyperparameterDef{Key: h.Key, Level: h.Level, Type: h.Type, Nullable: h.Nullable,
+			Default: defaults[h.Key], Min: h.Min, ExclusiveMin: h.ExclusiveMin, Max: h.Max})
+	}
+	return model.TrainingOptions{
+		Strategies:      strategies,
+		DefaultStrategy: tr.DefaultStrategy,
+		GPUs:            model.GPURange(tr.GPUs),
+		DatasetFormat:   tr.DatasetFormat,
+		Hyperparameters: hyper,
+		Limits:          model.UploadLimits{MaxModelBytes: st.Limits.MaxModelBytes, MaxDataBytes: st.Limits.MaxDataBytes, MaxFiles: st.Limits.MaxFiles},
+		Checkpoint: model.CheckpointDefaults{SizeFactor: st.Checkpoint.SizeFactor, WriteBytesPerSecond: st.Checkpoint.WriteBytesPerSecond,
+			MTBFSeconds: st.Checkpoint.MTBFSeconds, MinIntervalSeconds: st.Checkpoint.MinIntervalSeconds},
+	}
+}
+
+// Submit validates the spec, streams the model folder and the data files to S3, writes the dataset
+// manifest, config.json and jobset.json, creates the fencing item and the JobSet, and reports
+// job.submitted. The spec is checked before any upload, so a rejected request writes nothing; a
+// failure later leaves the uploaded objects (the backend may not delete) but never submits a JobSet.
+func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src UploadSource) (model.CreatedJob, error) {
+	strategy, merged, err := s.validate(spec)
 	if err != nil {
 		return model.CreatedJob{}, err
 	}
-	merged, fields := mergeHyperparameters(profile, req.Hyperparameters)
-	if len(fields) > 0 {
-		return model.CreatedJob{}, invalidFields(fields)
-	}
-	queue, err := s.cfg.Settings.QueueFor(req.GPUs)
+	queue, err := s.cfg.Settings.QueueFor(spec.GPUs)
 	if err != nil {
 		return model.CreatedJob{}, invalidFields([]model.FieldError{{Field: "gpus", Message: err.Error()}})
 	}
-	manifest, manifestSHA, err := s.readManifest(ctx, req.Dataset.ID, req.Dataset.Version)
-	if err != nil {
-		return model.CreatedJob{}, err
-	}
-	if !slices.Contains(profile.DatasetFormats, manifest.Format) {
-		return model.CreatedJob{}, &Error{Kind: KindUnprocessable, Msg: fmt.Sprintf("model %s does not read dataset format %s", req.Model, manifest.Format)}
-	}
-	trainScript, err := s.readTrainScript(ctx)
+
+	id := s.cfg.NewID()
+	prefix := datasetPrefix(id, datasetVersion)
+	up, err := s.receive(ctx, prefix, src)
 	if err != nil {
 		return model.CreatedJob{}, err
 	}
 
-	id := s.cfg.NewID()
-	name := req.Name
+	manifest := model.DatasetManifest{
+		SchemaVersion: manifestSchema, JobID: id, Model: up.modelName, Format: s.cfg.Settings.Training.DatasetFormat,
+		Files: up.entries, ModelBytes: up.modelBytes, DataBytes: up.dataBytes,
+		CreatedAt: s.cfg.Now().UTC().Format(time.RFC3339),
+	}
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return model.CreatedJob{}, fmt.Errorf("encode manifest: %w", err)
+	}
+	if err := s.objects.Put(ctx, prefix+manifestName, bytes.NewReader(manifestBytes)); err != nil {
+		return model.CreatedJob{}, upstream("upload "+manifestName, err)
+	}
+	manifestSHA := sha256Hex(manifestBytes)
+
+	name := spec.Name
 	if name == "" {
-		name = req.Model + "-" + id
+		name = defaultName(up.modelName, id)
 	}
 	checkpointFormat := s.cfg.Settings.Strategies[strategy].CheckpointFormat
 	configBytes, err := json.MarshalIndent(model.TrainConfig{
 		SchemaVersion:    configSchema,
-		Model:            req.Model,
+		Model:            up.modelName,
 		TrainingMode:     strategy,
 		CheckpointFormat: checkpointFormat,
 		Dataset: model.ConfigDataset{
-			URI:            fmt.Sprintf("s3://%s/%s", s.cfg.Bucket, datasetPrefix(req.Dataset.ID, req.Dataset.Version)),
-			Format:         manifest.Format,
+			URI:            fmt.Sprintf("s3://%s/%s", s.cfg.Bucket, prefix),
+			Format:         s.cfg.Settings.Training.DatasetFormat,
 			ManifestSHA256: manifestSHA,
 		},
-		Epochs:               merged.Epochs,
-		MaxSteps:             merged.MaxSteps,
-		BatchSizePerGPU:      merged.BatchSizePerGPU,
-		LearningRate:         merged.LearningRate,
-		WarmupSteps:          merged.WarmupSteps,
-		CheckpointEverySteps: merged.CheckpointEverySteps,
-		Seed:                 merged.Seed,
-		WorldSize:            req.GPUs,
+		Epochs:           merged.Epochs,
+		MaxSteps:         merged.MaxSteps,
+		BatchSizePerGPU:  merged.BatchSizePerGPU,
+		LearningRate:     merged.LearningRate,
+		WarmupSteps:      merged.WarmupSteps,
+		Seed:             merged.Seed,
+		WorldSize:        spec.GPUs,
+		CheckpointPolicy: ckptpolicy.Compute(up.modelBytes, s.cfg.Settings.Checkpoint),
 	}, "", "  ")
 	if err != nil {
 		return model.CreatedJob{}, fmt.Errorf("encode config: %w", err)
@@ -157,10 +242,11 @@ func (s *JobService) Submit(ctx context.Context, req model.SubmitJobRequest) (mo
 	configSHA := sha256Hex(configBytes)
 
 	js, err := jobspec.Render(jobspec.Input{
-		JobID: id, Generation: firstGeneration, Name: name, Model: req.Model, Strategy: strategy, GPUs: req.GPUs,
-		DatasetID: req.Dataset.ID, DatasetVersion: req.Dataset.Version, ConfigSHA256: configSHA,
-		CheckpointFormat: checkpointFormat, Hyperparameters: req.Hyperparameters, ModelSubPath: profile.ModelSubPath,
-		Queue: queue, Namespace: s.cfg.Namespace, Region: s.cfg.Region, ProgressTable: s.cfg.ProgressTable,
+		JobID: id, Generation: firstGeneration, Name: name, Model: up.modelName, Strategy: strategy, GPUs: spec.GPUs,
+		DatasetID: id, DatasetVersion: datasetVersion, DatasetManifestSHA256: manifestSHA, ConfigSHA256: configSHA,
+		CheckpointFormat: checkpointFormat, Hyperparameters: spec.Hyperparameters, Queue: queue,
+		Namespace: s.cfg.Namespace, Region: s.cfg.Region, Bucket: s.cfg.Bucket, FencingTable: s.cfg.FencingTable,
+		ProgressTable: s.cfg.ProgressTable, KafkaBootstrap: s.cfg.KafkaBootstrap, KafkaTopic: s.cfg.KafkaTopic,
 		Settings: s.cfg.Settings,
 	})
 	if err != nil {
@@ -171,14 +257,21 @@ func (s *JobService) Submit(ctx context.Context, req model.SubmitJobRequest) (mo
 		return model.CreatedJob{}, fmt.Errorf("encode JobSet: %w", err)
 	}
 
-	// Everything the pods read must be in S3 before the JobSet exists.
+	// Everything the pods read must be in S3 before the JobSet exists. jobset.json is the recovery original.
 	for _, f := range []struct {
 		name string
 		body []byte
-	}{{"config.json", configBytes}, {"train.py", trainScript}, {"jobset.json", jobsetBytes}} {
+	}{{"config.json", configBytes}, {"jobset.json", jobsetBytes}} {
 		if err := s.objects.Put(ctx, "code/"+id+"/"+f.name, bytes.NewReader(f.body)); err != nil {
 			return model.CreatedJob{}, upstream("upload "+f.name, err)
 		}
+	}
+
+	if err := s.fencing.Create(ctx, id); err != nil {
+		if errors.Is(err, model.ErrAlreadyExists) {
+			return model.CreatedJob{}, &Error{Kind: KindConflict, Msg: "job " + id + " already has a fencing item", Err: err}
+		}
+		return model.CreatedJob{}, upstream("create fencing item", err)
 	}
 
 	if err := s.sched.Submit(ctx, js); err != nil {
@@ -187,65 +280,206 @@ func (s *JobService) Submit(ctx context.Context, req model.SubmitJobRequest) (mo
 		}
 		return model.CreatedJob{}, &Error{Kind: KindUpstream, Code: "SUBMIT_FAILED", Msg: "submit JobSet failed: " + err.Error(), Err: err}
 	}
-	s.recordSubmitted(ctx, id, js.GetName(), queue)
+	now := s.cfg.Now().UTC()
+	s.report(ctx, model.SubmittedEvent{
+		JobID: id, Generation: firstGeneration, JobsetName: js.GetName(), GPUs: spec.GPUs, Strategy: strategy,
+		Queue: queue, ConfigSHA256: configSHA, ImageDigest: digestOf(s.cfg.Settings.Images.Trainer), OccurredAt: now,
+	})
 
-	slog.Info("job submitted", "id", id, "name", js.GetName(), "strategy", strategy, "gpus", req.GPUs)
+	slog.Info("job submitted", "id", id, "name", js.GetName(), "model", up.modelName, "strategy", strategy,
+		"gpus", spec.GPUs, "modelBytes", up.modelBytes, "dataBytes", up.dataBytes)
 	return model.CreatedJob{
 		ID: id, Name: name, Status: model.StatusQueued, Generation: firstGeneration, JobsetName: js.GetName(),
-		Queue: queue, Config: configBytes, ConfigSHA256: configSHA, CreatedAt: s.cfg.Now().UTC(),
+		Queue: queue, Config: configBytes, ConfigSHA256: configSHA, CreatedAt: now,
 	}, nil
 }
 
-// validate checks everything that needs no I/O and resolves the strategy.
-func (s *JobService) validate(req model.SubmitJobRequest) (settings.Profile, string, error) {
-	var fields []model.FieldError
-	bad := func(field, msg string) { fields = append(fields, model.FieldError{Field: field, Message: msg}) }
+// received is what the file parts of one submission turned into.
+type received struct {
+	modelName             string
+	entries               []model.ManifestEntry
+	modelBytes, dataBytes int64
+}
 
-	if req.Name != "" && !validName.MatchString(req.Name) {
-		bad("name", "1~63자, 소문자 · 숫자 · '-'만 쓸 수 있습니다")
+// receive streams each part to S3 under prefix while hashing it, and enforces the limits.
+func (s *JobService) receive(ctx context.Context, prefix string, src UploadSource) (received, error) {
+	lim := s.cfg.Settings.Limits
+	var r received
+	seen := map[string]bool{}
+	for {
+		u, err := src.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return received{}, invalid("read upload: " + err.Error())
+		}
+		if len(r.entries) >= lim.MaxFiles {
+			return received{}, tooLarge(fmt.Sprintf("too many files: at most %d", lim.MaxFiles))
+		}
+
+		var name string
+		var budget int64
+		switch u.Field {
+		case "model":
+			folder, rest, ok := splitModelPath(u.Path)
+			if !ok {
+				return received{}, invalid("model file path must be <folder>/<file>: " + u.Path)
+			}
+			if r.modelName == "" {
+				r.modelName = folder
+			} else if folder != r.modelName {
+				return received{}, invalid("model files come from more than one folder: " + r.modelName + ", " + folder)
+			}
+			name, budget = "model/"+rest, lim.MaxModelBytes-r.modelBytes
+		case "data":
+			if !safeName(u.Path) || !strings.HasSuffix(u.Path, ".jsonl") {
+				return received{}, invalid("training data must be .jsonl files: " + u.Path)
+			}
+			name, budget = "data/"+u.Path, lim.MaxDataBytes-r.dataBytes
+		default:
+			return received{}, invalid("unknown upload field: " + u.Field)
+		}
+		if seen[name] {
+			return received{}, invalid("duplicate file: " + name)
+		}
+		seen[name] = true
+
+		body := &meteredReader{r: u.Body, left: budget, hash: sha256.New()}
+		if err := s.objects.Put(ctx, prefix+name, body); err != nil {
+			if body.over {
+				return received{}, tooLarge(fmt.Sprintf("%s upload is over the limit (%d bytes)", u.Field, map[string]int64{"model": lim.MaxModelBytes, "data": lim.MaxDataBytes}[u.Field]))
+			}
+			if body.readErr != nil {
+				return received{}, invalid("read upload " + name + ": " + body.readErr.Error())
+			}
+			return received{}, upstream("upload "+name, err)
+		}
+		r.entries = append(r.entries, model.ManifestEntry{Name: name, SHA256: hex.EncodeToString(body.hash.Sum(nil)), SizeBytes: body.n})
+		if u.Field == "model" {
+			r.modelBytes += body.n
+		} else {
+			r.dataBytes += body.n
+		}
 	}
-	profile, ok := s.cfg.Settings.ModelProfiles[req.Model]
-	strategy := req.Strategy
-	if !ok {
-		bad("model", "등록되지 않은 모델입니다")
-	} else {
-		if strategy == "" {
-			strategy = profile.DefaultStrategy
-		}
-		if !slices.Contains(profile.Strategies, strategy) {
-			bad("strategy", "지원 방식: "+strings.Join(profile.Strategies, ", "))
-		}
-		if msg := gpuProblem(profile, s.cfg.Settings.Strategies[strategy], strategy, req.GPUs); msg != "" {
-			bad("gpus", msg)
-		}
+
+	var fields []model.FieldError
+	if !seen[modelConfigName] {
+		fields = append(fields, model.FieldError{Field: "model", Message: "Hugging Face 모델 폴더(config.json 포함)가 필요합니다"})
 	}
-	if req.Dataset == nil || req.Dataset.ID == "" || req.Dataset.Version < 1 {
-		bad("dataset", "{id, version}이 필요합니다")
-	} else if !validDataID.MatchString(req.Dataset.ID) {
-		bad("dataset", "잘못된 데이터셋 ID입니다")
+	if !slices.ContainsFunc(r.entries, func(e model.ManifestEntry) bool { return strings.HasPrefix(e.Name, "data/") }) {
+		fields = append(fields, model.FieldError{Field: "data", Message: ".jsonl 학습 데이터가 1개 이상 필요합니다"})
 	}
 	if len(fields) > 0 {
-		return settings.Profile{}, "", invalidFields(fields)
+		return received{}, invalidFields(fields)
 	}
-	return profile, strategy, nil
+	sort.Slice(r.entries, func(a, b int) bool { return r.entries[a].Name < r.entries[b].Name })
+	return r, nil
+}
+
+// meteredReader hashes and counts what it reads and fails once more than left bytes come through.
+type meteredReader struct {
+	r       io.Reader
+	left    int64
+	n       int64
+	hash    hash.Hash
+	over    bool
+	readErr error
+}
+
+var errOverLimit = errors.New("upload over the limit")
+
+func (m *meteredReader) Read(p []byte) (int, error) {
+	n, err := m.r.Read(p)
+	if n > 0 {
+		m.n += int64(n)
+		_, _ = m.hash.Write(p[:n])
+		if m.n > m.left {
+			m.over = true
+			return n, errOverLimit
+		}
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		m.readErr = err
+	}
+	return n, err
+}
+
+// splitModelPath splits "gpt2/tokenizer/vocab.json" into "gpt2" and "tokenizer/vocab.json", rejecting
+// anything that could leave the job's prefix.
+func splitModelPath(p string) (string, string, bool) {
+	parts := strings.Split(p, "/")
+	if len(parts) < 2 {
+		return "", "", false
+	}
+	for _, part := range parts {
+		if !safeName(part) {
+			return "", "", false
+		}
+	}
+	return parts[0], strings.Join(parts[1:], "/"), true
+}
+
+// defaultName is "<model folder>-<id>" made Kubernetes-safe, e.g. GPT-2 small → gpt-2-small-3f9a1c2e.
+func defaultName(modelName, id string) string {
+	base := strings.Trim(nameChars.ReplaceAllString(strings.ToLower(modelName), "-"), "-")
+	if len(base) > 50 {
+		base = strings.TrimRight(base[:50], "-")
+	}
+	if base == "" {
+		return "job-" + id
+	}
+	return base + "-" + id
+}
+
+// validate checks the spec (no I/O) and returns the strategy and the merged training values.
+func (s *JobService) validate(spec model.SubmitSpec) (string, settings.Defaults, error) {
+	var fields []model.FieldError
+	bad := func(field, msg string) { fields = append(fields, model.FieldError{Field: field, Message: msg}) }
+	tr := s.cfg.Settings.Training
+
+	if spec.Name != "" && !validName.MatchString(spec.Name) {
+		bad("name", "1~63자, 소문자 · 숫자 · '-'만 쓸 수 있습니다")
+	}
+	strategy := spec.Strategy
+	if strategy == "" {
+		strategy = tr.DefaultStrategy
+	}
+	st, ok := s.cfg.Settings.Strategies[strategy]
+	if !ok {
+		names := make([]string, 0, len(s.cfg.Settings.Strategies))
+		for n := range s.cfg.Settings.Strategies {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		bad("strategy", "지원 방식: "+strings.Join(names, ", "))
+	} else if msg := gpuProblem(tr.GPUs, st, strategy, spec.GPUs); msg != "" {
+		bad("gpus", msg)
+	}
+	merged, hfields := mergeHyperparameters(tr, spec.Hyperparameters)
+	fields = append(fields, hfields...)
+	if len(fields) > 0 {
+		return "", settings.Defaults{}, invalidFields(fields)
+	}
+	return strategy, merged, nil
 }
 
 // gpuProblem says why this GPU count cannot run, or "" when it can.
-func gpuProblem(p settings.Profile, st settings.Strategy, strategy string, gpus int) string {
+func gpuProblem(g settings.GPURange, st settings.Strategy, strategy string, gpus int) string {
 	switch {
-	case !slices.Contains(p.GPUs.Options, gpus):
-		return fmt.Sprintf("선택 가능한 GPU 수: %v", p.GPUs.Options)
-	case gpus > p.GPUs.Max:
-		return fmt.Sprintf("현재 GPU 할당량으로는 최대 %d개까지 쓸 수 있습니다", p.GPUs.Max)
+	case !slices.Contains(g.Options, gpus):
+		return fmt.Sprintf("선택 가능한 GPU 수: %v", g.Options)
+	case gpus > g.Max:
+		return fmt.Sprintf("현재 GPU 할당량으로는 최대 %d개까지 쓸 수 있습니다", g.Max)
 	case gpus < st.MinGPUs:
 		return fmt.Sprintf("%s는 GPU %d개 이상이 필요합니다", strings.ToUpper(strategy), st.MinGPUs)
 	}
 	return ""
 }
 
-// mergeHyperparameters overlays the keys the profile opens on its defaults.
-func mergeHyperparameters(p settings.Profile, in map[string]any) (settings.Defaults, []model.FieldError) {
-	merged := p.Defaults
+// mergeHyperparameters overlays the request's values on the training defaults.
+func mergeHyperparameters(tr settings.Training, in map[string]any) (settings.Defaults, []model.FieldError) {
+	merged := tr.Defaults
 	var fields []model.FieldError
 	keys := make([]string, 0, len(in))
 	for k := range in {
@@ -254,63 +488,68 @@ func mergeHyperparameters(p settings.Profile, in map[string]any) (settings.Defau
 	sort.Strings(keys)
 	for _, key := range keys {
 		field := "hyperparameters." + key
-		i := slices.IndexFunc(p.Hyperparameters, func(h settings.Hyperparameter) bool { return h.Key == key })
+		i := slices.IndexFunc(tr.Hyperparameters, func(h settings.Hyperparameter) bool { return h.Key == key })
 		if i < 0 {
 			fields = append(fields, model.FieldError{Field: field, Message: "변경할 수 없는 값입니다"})
 			continue
 		}
-		def := p.Hyperparameters[i]
+		def := tr.Hyperparameters[i]
+		if in[key] == nil {
+			if !def.Nullable {
+				fields = append(fields, model.FieldError{Field: field, Message: "값이 필요합니다"})
+			} else if key == "max_steps" {
+				merged.MaxSteps = nil
+			}
+			continue
+		}
 		v, ok := in[key].(float64)
 		switch {
 		case !ok:
 			fields = append(fields, model.FieldError{Field: field, Message: "숫자여야 합니다"})
+			continue
 		case def.Type == "integer" && v != math.Trunc(v):
 			fields = append(fields, model.FieldError{Field: field, Message: "정수여야 합니다"})
+			continue
 		case def.Min != nil && v < *def.Min, def.Max != nil && v > *def.Max, def.ExclusiveMin != nil && v <= *def.ExclusiveMin:
 			fields = append(fields, model.FieldError{Field: field, Message: "범위를 벗어났습니다"})
+			continue
+		}
+		switch key {
+		case "epochs":
+			merged.Epochs = int64(v)
+		case "max_steps":
+			n := int64(v)
+			merged.MaxSteps = &n
+		case "batch_size_per_gpu":
+			merged.BatchSizePerGPU = int64(v)
+		case "learning_rate":
+			merged.LearningRate = v
+		case "warmup_steps":
+			merged.WarmupSteps = int64(v)
+		case "seed":
+			merged.Seed = int64(v)
 		default:
-			switch key {
-			case "epochs":
-				merged.Epochs = int64(v)
-			case "batch_size_per_gpu":
-				merged.BatchSizePerGPU = int64(v)
-			case "learning_rate":
-				merged.LearningRate = v
-			default:
-				fields = append(fields, model.FieldError{Field: field, Message: "변경할 수 없는 값입니다"})
-			}
+			fields = append(fields, model.FieldError{Field: field, Message: "변경할 수 없는 값입니다"})
 		}
 	}
 	return merged, fields
 }
 
-func (s *JobService) readTrainScript(ctx context.Context) ([]byte, error) {
-	key := s.cfg.Settings.TrainScriptKey
-	data, size, err := s.objects.Get(ctx, key, maxMetadataBytes)
-	if errors.Is(err, model.ErrNotFound) {
-		return nil, notFound(key + " not found: upload the test assets first (examples/fsdp/seed_assets.py)")
+// report sends job.submitted to Kafka and writes the first timeline step. Best-effort: the job is
+// already queued, so a failure only loses the record.
+func (s *JobService) report(ctx context.Context, e model.SubmittedEvent) {
+	if err := s.lifecycle.Submitted(ctx, e); err != nil {
+		slog.Warn("publish job.submitted", "id", e.JobID, "err", err)
 	}
-	if err != nil {
-		return nil, upstream("read "+key, err)
-	}
-	if int64(len(data)) < size {
-		return nil, invalid(key + " is too large")
-	}
-	return data, nil
-}
-
-// recordSubmitted writes the first timeline step. Best-effort: the job is already queued,
-// so a DynamoDB error only loses this entry.
-func (s *JobService) recordSubmitted(ctx context.Context, id, name, queue string) {
-	now := s.cfg.Now().UTC().Truncate(time.Millisecond)
+	t := e.OccurredAt.Truncate(time.Millisecond)
 	err := s.record.Put(ctx, model.JobEvent{
-		JobID: id, Key: now.Format(model.EventKeyTimeFormat) + "#" + model.ManagerCluster + "#submitted",
-		Time: now, LastTime: now, Cluster: model.ManagerCluster, Source: "backend", Reason: "Submitted",
-		Message: "config.json and jobset.json stored in S3; JobSet " + name + " created in queue " + queue,
-		Type:    "Normal", Object: "JobSet/" + name, Count: 1,
+		JobID: e.JobID, Key: t.Format(model.EventKeyTimeFormat) + "#" + model.ManagerCluster + "#submitted",
+		Time: t, LastTime: t, Cluster: model.ManagerCluster, Source: "backend", Reason: "Submitted",
+		Message: "model and data stored in S3; JobSet " + e.JobsetName + " created in queue " + e.Queue,
+		Type:    "Normal", Object: "JobSet/" + e.JobsetName, Count: 1,
 	})
 	if err != nil {
-		slog.Warn("record submitted event", "id", id, "err", err)
+		slog.Warn("record submitted event", "id", e.JobID, "err", err)
 	}
 }
 
@@ -364,9 +603,10 @@ func (s *JobService) Get(ctx context.Context, id string) (model.Job, error) {
 	} else if !errors.Is(err, model.ErrNotFound) {
 		slog.Warn("config lookup failed", "id", id, "err", err)
 	}
+	images := s.cfg.Settings.Images
 	job.Images = map[string]string{
-		"trainer":          s.cfg.Settings.Images.Trainer,
-		"progressReporter": s.cfg.Settings.Images.ProgressReporter,
+		"trainer":    images.Trainer,
+		"checkpoint": images.Checkpoint,
 	}
 	return job, nil
 }
@@ -386,7 +626,7 @@ func (s *JobService) Events(ctx context.Context, id string) ([]model.JobEvent, e
 	return events, nil
 }
 
-// Files returns the job's code files and the manifest of the dataset version it used.
+// Files returns the job's code files and the manifest of the files it uploaded.
 func (s *JobService) Files(ctx context.Context, id string) ([]model.File, error) {
 	if !validJobID.MatchString(id) {
 		return nil, invalid("invalid job id")
@@ -451,9 +691,21 @@ func (s *JobService) preview(ctx context.Context, key string) (model.FileContent
 	return model.FileContent{Data: data, Truncated: int64(len(data)) < size, TotalSize: size}, nil
 }
 
+func datasetPrefix(id string, version int) string {
+	return fmt.Sprintf("datasets/%s/v%d/", id, version)
+}
+
 // safeName accepts a plain file name: no path separators, so a request cannot leave its prefix.
 func safeName(name string) bool {
 	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, `/\`)
+}
+
+// digestOf returns the sha256:… part of a pinned image, or "".
+func digestOf(image string) string {
+	if _, d, ok := strings.Cut(image, "@"); ok {
+		return d
+	}
+	return ""
 }
 
 func sha256Hex(b []byte) string {

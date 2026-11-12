@@ -21,7 +21,7 @@ const (
 
 // Status is the job state the screens show.
 //
-// 임시 구성: 복구 컨트롤러와 서비스 DB가 없어 Phase에서 바로 계산한다. RECOVERING · REJECTED · CANCELLED는 아직 없다.
+// 서비스 DB가 없어 Phase에서 바로 계산한다. RECOVERING · REJECTED · CANCELLED는 아직 없다.
 type Status string
 
 const (
@@ -98,38 +98,47 @@ type Job struct {
 	Images    map[string]string `json:"images,omitempty"`
 }
 
-// SubmitJobRequest is the POST /api/jobs body. Omitted strategy and name get defaults; omitted
-// hyperparameters keep the model profile's values.
-type SubmitJobRequest struct {
+// SubmitSpec is the first part ("spec") of the multipart POST /api/jobs. The model folder and the
+// training data follow as file parts. Omitted strategy and name get defaults; omitted
+// hyperparameters keep the training defaults.
+type SubmitSpec struct {
 	Name            string         `json:"name"`
-	Model           string         `json:"model"`
 	Strategy        string         `json:"strategy"`
 	GPUs            int            `json:"gpus"`
-	Dataset         *DatasetRef    `json:"dataset"`
 	Hyperparameters map[string]any `json:"hyperparameters"`
 }
 
 // TrainConfig is config.json. train.py rejects missing and unknown keys, so every key is always written.
+// The model folder and the data files are in the dataset: /data/model and /data/data/*.jsonl in the pod.
 type TrainConfig struct {
-	SchemaVersion        int           `json:"schema_version"`
-	Model                string        `json:"model"`
-	TrainingMode         string        `json:"training_mode"`
-	CheckpointFormat     string        `json:"checkpoint_format"`
-	Dataset              ConfigDataset `json:"dataset"`
-	Epochs               int64         `json:"epochs"`
-	MaxSteps             *int64        `json:"max_steps"`
-	BatchSizePerGPU      int64         `json:"batch_size_per_gpu"`
-	LearningRate         float64       `json:"learning_rate"`
-	WarmupSteps          int64         `json:"warmup_steps"`
-	CheckpointEverySteps *int64        `json:"checkpoint_every_steps"`
-	Seed                 int64         `json:"seed"`
-	WorldSize            int           `json:"world_size"`
+	SchemaVersion    int              `json:"schema_version"`
+	Model            string           `json:"model"` // the uploaded folder's name, for people
+	TrainingMode     string           `json:"training_mode"`
+	CheckpointFormat string           `json:"checkpoint_format"`
+	Dataset          ConfigDataset    `json:"dataset"`
+	Epochs           int64            `json:"epochs"`
+	MaxSteps         *int64           `json:"max_steps"`
+	BatchSizePerGPU  int64            `json:"batch_size_per_gpu"`
+	LearningRate     float64          `json:"learning_rate"`
+	WarmupSteps      int64            `json:"warmup_steps"`
+	Seed             int64            `json:"seed"`
+	WorldSize        int              `json:"world_size"`
+	CheckpointPolicy CheckpointPolicy `json:"checkpoint_policy"`
 }
 
 type ConfigDataset struct {
 	URI            string `json:"uri"`
 	Format         string `json:"format"`
 	ManifestSHA256 string `json:"manifest_sha256"`
+}
+
+// CheckpointPolicy is how often to save (Young/Daly, design §5). train.py turns IntervalSeconds into a
+// step interval after measuring WarmupMeasureSteps steps.
+type CheckpointPolicy struct {
+	IntervalSeconds      float64 `json:"interval_seconds"`
+	EstimatedSaveSeconds float64 `json:"estimated_save_seconds"`
+	MTBFSeconds          float64 `json:"mtbf_seconds"`
+	WarmupMeasureSteps   int64   `json:"warmup_measure_steps"`
 }
 
 // CreatedJob is the response to a submission.

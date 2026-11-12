@@ -17,16 +17,14 @@ import (
 	"github.com/DevOops-Team/Backend/internal/model"
 )
 
-// GroupVersionResources the backend reads and writes on k3s.
+// GroupVersionResources the backend reads and writes on the on-prem management cluster.
 var (
 	JobSetGVR   = schema.GroupVersionResource{Group: "jobset.x-k8s.io", Version: "v1alpha2", Resource: "jobsets"}
 	WorkloadGVR = schema.GroupVersionResource{Group: "kueue.x-k8s.io", Version: "v1beta2", Resource: "workloads"}
 	EventGVR    = schema.GroupVersionResource{Version: "v1", Resource: "events"}
-
-	metav1GetOptions = metav1.GetOptions{}
 )
 
-// Kube submits JobSets to k3s and reads their state (JobSet + Workload → status, Events for the timeline).
+// Kube submits JobSets to the on-prem management cluster and reads their state (JobSet + Workload → status, Events for the timeline).
 type Kube struct {
 	dyn       dynamic.Interface
 	namespace string
