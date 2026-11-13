@@ -4,12 +4,14 @@
 //
 // Pod (rank r, GPU 1):
 //
-//	[init]    ckpt-init          generation · owner check, config.json → /code, dataset → /data, approved checkpoint → /ckpt
+//	[init]    ckpt-init          generation · owner check, config.json → /code, dataset (model · data · the user's
+//	                             train.py) → /data, approved checkpoint → /ckpt
 //	[sidecar] ckpt-sidecar       /ckpt → S3, rank 0: manifest · approval · heartbeat · Kafka checkpoint.approved,
 //	                             /progress/progress.json → Kafka job.progress (GPU-141 · GPU-146)
-//	[main]    trainer            torchrun /opt/train/train.py (inside the trainer image)
+//	[main]    trainer            torchrun /data/code/train.py (the user's script; the image is only the environment)
 //
-// The uploaded model folder is part of the dataset (/data/model), so ckpt-init needs no model URI.
+// The uploaded model folder and train.py are part of the dataset (/data/model, /data/code/train.py), so
+// ckpt-init needs no extra URI and checks them against the dataset manifest like the data files.
 package jobspec
 
 import (
@@ -37,7 +39,7 @@ const (
 	codeDir    = "/code"
 	dataDir    = "/data"
 	ckptDir    = "/ckpt"
-	trainEntry = "/opt/train/train.py"
+	trainEntry = dataDir + "/code/train.py" // uploaded with the dataset (service trainName)
 
 	// ClusterInfoConfigMap is the per-worker ConfigMap that tells ckpt-init · ckpt-sidecar which cluster
 	// they run on (the JobSet is copied unchanged to every worker, so env values cannot say it).
@@ -276,7 +278,7 @@ exit $rc`, master, master, in.GPUs, master, pod.MasterPort, trainEntry, stopExit
 
 	return map[string]any{
 		"name":    "trainer",
-		"image":   in.Settings.Images.Trainer, // train.py 포함
+		"image":   in.Settings.Images.Trainer, // 학습 환경만, train.py는 /data/code에 주입
 		"command": []any{"sh", "-c"},
 		"args":    []any{script},
 		"ports":   []any{map[string]any{"containerPort": pod.MasterPort}},

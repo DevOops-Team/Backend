@@ -60,8 +60,9 @@ paths:
         multipart/form-data. 첫 파트는 `spec`(JSON), 이어서 파일 파트를 보낸다. 파일 경로는 파트 **이름**에 넣는다(파일명은 기본 이름만 남기 때문).
         - `model/<폴더명>/<폴더 안 경로>`: Hugging Face 모델 폴더의 파일 전부 (`config.json` 필수, 한 폴더만)
         - `data/<파일명>.jsonl`: 학습 데이터 (한 줄에 `{"text": ...}`), 1개 이상
+        - `train/<파일명>.py`: 학습 코드, 정확히 1개 (최대 1MiB). 파일명과 상관없이 `datasets/{id}/v1/code/train.py`로 저장해 manifest에 넣고, ckpt-init이 Pod의 `/data/code/train.py`로 받아 trainer가 `torchrun`으로 실행한다. trainer 이미지는 학습 환경(torch · transformers)만 담는다. 파일 보기용 사본은 `code/{id}/train.py`
 
-        처리: spec 검증(실패하면 아무것도 읽지 · 쓰지 않음) → 파일을 S3 `datasets/{id}/v1/{model,data}/`로 스트리밍(sha256 · 크기 계산, 상한 초과 시 413) → `manifest.json` → 체크포인트 간격 계산(Young/Daly) → `code/{id}/config.json` · `jobset.json` → DynamoDB 펜싱 첫 항목 → JobSet 제출 → Kafka `job.submitted`(최선 노력).
+        처리: spec 검증(실패하면 아무것도 읽지 · 쓰지 않음) → 파일을 S3 `datasets/{id}/v1/{model,data,code}/`로 스트리밍(sha256 · 크기 계산, 상한 초과 시 413) → `manifest.json` → 체크포인트 간격 계산(Young/Daly) → `code/{id}/train.py` · `config.json` · `jobset.json` → DynamoDB 펜싱 첫 항목 → JobSet 제출 → Kafka `job.submitted`(최선 노력).
       requestBody:
         required: true
         content:
@@ -74,7 +75,7 @@ paths:
               additionalProperties:
                 type: string
                 format: binary
-                description: "`model/<폴더>/<경로>` 또는 `data/<파일>.jsonl`"
+                description: "`model/<폴더>/<경로>`, `data/<파일>.jsonl` 또는 `train/<파일>.py`"
       responses:
         "201":
           description: 제출됨
@@ -297,10 +298,11 @@ components:
               max: { type: number }
         limits:
           type: object
-          required: [maxModelBytes, maxDataBytes, maxFiles]
+          required: [maxModelBytes, maxDataBytes, maxTrainBytes, maxFiles]
           properties:
             maxModelBytes: { type: integer, format: int64 }
             maxDataBytes: { type: integer, format: int64 }
+            maxTrainBytes: { type: integer, format: int64, description: train.py 상한 }
             maxFiles: { type: integer }
         checkpoint:
           type: object

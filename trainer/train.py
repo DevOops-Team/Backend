@@ -1,6 +1,7 @@
 """Hugging Face causal LM FSDP · DDP 학습. 설정은 config.json 하나로 받는다 (Confluence `학습 파라미터 주입 방식`).
 
-trainer 이미지(/opt/train/train.py)에 들어 있고, 백엔드가 만든 JobSet의 torchrun이 Pod마다 실행한다.
+기본 학습 코드다. 사용자가 제출 때 올리면 ckpt-init이 DATA_DIR/code/train.py로 받아 두고,
+백엔드가 만든 JobSet의 torchrun이 trainer 이미지(학습 환경) 위에서 Pod마다 실행한다.
   - TRAIN_CONFIG(/code/config.json)을 읽고 CONFIG_SHA256 · 키 · world_size를 확인한다.
   - ckpt-init이 받아 둔 업로드: 모델 폴더 DATA_DIR/model, 학습 데이터 DATA_DIR/data/*.jsonl ({"text": ...}).
   - 어떤 HF 모델이든 AutoModelForCausalLM으로 읽는다. FSDP는 모델의 _no_split_modules(트랜스포머 블록) 단위로 감싼다.
