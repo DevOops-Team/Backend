@@ -363,7 +363,7 @@ func (s *JobService) receive(ctx context.Context, prefix string, src UploadSourc
 		seen[name] = true
 
 		var copied bytes.Buffer // train.py is kept for its code/<id>/ copy; it is at most MaxTrainBytes
-		var src io.Reader = u.Body
+		src := u.Body
 		if u.Field == "train" {
 			src = io.TeeReader(u.Body, &copied)
 		}
