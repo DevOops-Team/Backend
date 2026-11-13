@@ -38,3 +38,16 @@ type SubmittedEvent struct {
 	ImageDigest  string // trainer image digest, "" when the image is not pinned
 	OccurredAt   time.Time
 }
+
+// LifecycleEvent is one Kafka job.lifecycle record in the shared envelope (Data collector/envelope.py):
+// job.* from the backend and the job-watcher, job.progress and checkpoint.approved from the ckpt-sidecar.
+type LifecycleEvent struct {
+	EventID    string
+	Type       string
+	OccurredAt time.Time
+	Source     string
+	Cluster    string
+	JobID      string
+	Generation int
+	Payload    map[string]any
+}

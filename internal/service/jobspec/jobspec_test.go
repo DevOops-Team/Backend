@@ -20,7 +20,7 @@ func input(t *testing.T) Input {
 		DatasetID: "3f9a1c2e", DatasetVersion: 1, DatasetManifestSHA256: "6b04", ConfigSHA256: "f7be89cf",
 		CheckpointFormat: "fsdp-dcp", Hyperparameters: map[string]any{"epochs": 3.0}, Queue: "queue-light",
 		Namespace: "training", Region: "us-east-2", Bucket: "ckpt-bucket", FencingTable: "devoops-prod-fencing",
-		ProgressTable: "devoops-prod-job-progress", KafkaBootstrap: "172.30.0.40:9092", KafkaTopic: "job.lifecycle",
+		KafkaBootstrap: "172.30.0.40:9092", KafkaTopic: "job.lifecycle",
 		Settings: s,
 	}
 }
@@ -298,35 +298,19 @@ func TestRenderUsesPodSettingsAndServiceAccount(t *testing.T) {
 	}
 }
 
-func TestRenderAddsProgressReporterAsNativeSidecar(t *testing.T) {
-	sc := container(t, podSpec(t, doc(t, input(t)))["initContainers"], "progress-reporter")
-	if sc["restartPolicy"] != "Always" {
-		t.Errorf("restartPolicy = %v", sc["restartPolicy"])
+// Progress goes to Kafka through the ckpt-sidecar (job.progress); no DynamoDB writer in the pod (GPU-146).
+func TestRenderHasNoProgressReporter(t *testing.T) {
+	inits := podSpec(t, doc(t, input(t)))["initContainers"].([]any)
+	if len(inits) != 2 {
+		t.Errorf("%d init containers, want ckpt-init and ckpt-sidecar", len(inits))
 	}
-	// The checkpoint image already ships Python and boto3: no pip install from the internet at run time.
-	if sc["image"] != "ghcr.io/devoops-team/checkpoint@sha256:c1" {
-		t.Errorf("image = %v, want the checkpoint image", sc["image"])
-	}
-	if a, _ := json.Marshal(sc["args"]); strings.Contains(string(a), "pip install") {
-		t.Error("progress-reporter still installs packages at run time")
-	}
-	got := envOf(sc)
-	for k, want := range map[string]string{
-		"JOB_ID": "3f9a1c2e", "GENERATION": "1", "PROGRESS_TABLE": "devoops-prod-job-progress",
-	} {
-		if got[k] != want {
-			t.Errorf("env %s = %q, want %q", k, got[k], want)
-		}
-	}
-}
-
-func TestRenderLeavesOutProgressReporterWithoutTable(t *testing.T) {
-	in := input(t)
-	in.ProgressTable = ""
-	for _, c := range podSpec(t, doc(t, in))["initContainers"].([]any) {
+	for _, c := range inits {
 		if c.(map[string]any)["name"] == "progress-reporter" {
-			t.Error("progress-reporter added without a table to write to")
+			t.Error("progress-reporter is still rendered")
 		}
+	}
+	if got := envOf(container(t, inits, "ckpt-sidecar"))["PROGRESS_FILE"]; got != "/progress/progress.json" {
+		t.Errorf("ckpt-sidecar PROGRESS_FILE = %q", got)
 	}
 }
 

@@ -21,16 +21,32 @@ const (
 
 // Status is the job state the screens show.
 //
-// 서비스 DB가 없어 Phase에서 바로 계산한다. RECOVERING · REJECTED · CANCELLED는 아직 없다.
+// Kafka job.lifecycle 사건(JobView)에서 정한다. 사건이 아직 없으면(Kafka 장애 · 보존 기간 7일이 지난 잡)
+// 관리 클러스터의 Phase에서 계산한다 (GPU-146). REJECTED는 아직 없다.
 type Status string
 
 const (
-	StatusQueued    Status = "QUEUED"
-	StatusAdmitted  Status = "ADMITTED"
-	StatusRunning   Status = "RUNNING"
-	StatusSucceeded Status = "SUCCEEDED"
-	StatusFailed    Status = "FAILED"
+	StatusQueued     Status = "QUEUED"
+	StatusAdmitted   Status = "ADMITTED"
+	StatusRunning    Status = "RUNNING"
+	StatusSucceeded  Status = "SUCCEEDED"
+	StatusFailed     Status = "FAILED"
+	StatusRecovering Status = "RECOVERING" // job.fenced: 재배치 요청으로 세대를 내림, 다음 세대 대기
+	StatusCancelled  Status = "CANCELLED"  // job.stopped: 사용자 · Backend가 중지
 )
+
+// StatusRank orders a generation's statuses; a later event never moves a generation backwards.
+func StatusRank(s Status) int {
+	switch s {
+	case StatusAdmitted:
+		return 1
+	case StatusRunning:
+		return 2
+	case StatusSucceeded, StatusFailed, StatusRecovering, StatusCancelled:
+		return 3
+	}
+	return 0
+}
 
 // StatusOf maps a generation's phase to the job status.
 func StatusOf(p Phase) Status {
@@ -76,7 +92,8 @@ type JobStatus struct {
 	CreatedAt       time.Time      `json:"createdAt"`
 }
 
-// Progress is the item train.py (rank 0) overwrites every step, copied to DynamoDB by the sidecar.
+// Progress is the latest job.progress the ckpt-sidecar (rank 0) sent from train.py's progress file,
+// with the last approved checkpoint (checkpoint.approved) folded in.
 type Progress struct {
 	Status             string    `json:"status"`
 	Generation         int64     `json:"generation"`
@@ -86,6 +103,16 @@ type Progress struct {
 	LastCheckpointStep int64     `json:"lastCheckpointStep"`
 	NodeName           string    `json:"nodeName,omitempty"`
 	UpdatedAt          time.Time `json:"updatedAt"`
+}
+
+// JobView is what Kafka job.lifecycle says about a job's latest generation (service/jobview).
+type JobView struct {
+	Generation int
+	Status     Status // "" until a status event arrives (only progress seen)
+	Message    string // why it failed or was fenced
+	Cluster    string
+	Progress   *Progress
+	UpdatedAt  time.Time
 }
 
 // Job is the API view: queue state plus training progress (null until train.py first writes).

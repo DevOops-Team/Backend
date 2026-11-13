@@ -25,6 +25,7 @@ import (
 	"github.com/DevOops-Team/Backend/internal/model"
 	"github.com/DevOops-Team/Backend/internal/service/ckptpolicy"
 	"github.com/DevOops-Team/Backend/internal/service/jobspec"
+	"github.com/DevOops-Team/Backend/internal/service/jobview"
 	"github.com/DevOops-Team/Backend/internal/settings"
 )
 
@@ -43,9 +44,10 @@ type Scheduler interface {
 	List(ctx context.Context) ([]model.JobStatus, error)
 }
 
-// ProgressStore reads the per-step progress train.py writes (DynamoDB, via progress-reporter).
-type ProgressStore interface {
-	Get(ctx context.Context, jobIDs []string) (map[string]model.Progress, error)
+// JobViews is what Kafka job.lifecycle says about each job: status, worker, progress, last checkpoint
+// (service/jobview, GPU-146).
+type JobViews interface {
+	Views(ids []string) map[string]model.JobView
 }
 
 // Fencing creates the job's first fencing item (DynamoDB); model.ErrAlreadyExists if it exists.
@@ -105,7 +107,6 @@ type Config struct {
 	Region         string
 	Bucket         string
 	FencingTable   string
-	ProgressTable  string
 	KafkaBootstrap string
 	KafkaTopic     string
 	Settings       settings.Settings
@@ -117,7 +118,7 @@ type JobService struct {
 	cfg       Config
 	objects   ObjectStore
 	sched     Scheduler
-	progress  ProgressStore
+	views     JobViews
 	fencing   Fencing
 	lifecycle Lifecycle
 	events    EventReader
@@ -128,7 +129,7 @@ type JobService struct {
 type Deps struct {
 	Objects   ObjectStore
 	Scheduler Scheduler
-	Progress  ProgressStore
+	Views     JobViews
 	Fencing   Fencing
 	Lifecycle Lifecycle
 	Events    EventReader
@@ -139,7 +140,7 @@ func NewJobService(cfg Config, d Deps) *JobService {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &JobService{cfg: cfg, objects: d.Objects, sched: d.Scheduler, progress: d.Progress, fencing: d.Fencing,
+	return &JobService{cfg: cfg, objects: d.Objects, sched: d.Scheduler, views: d.Views, fencing: d.Fencing,
 		lifecycle: d.Lifecycle, events: d.Events, record: d.Record}
 }
 
@@ -246,7 +247,7 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 		DatasetID: id, DatasetVersion: datasetVersion, DatasetManifestSHA256: manifestSHA, ConfigSHA256: configSHA,
 		CheckpointFormat: checkpointFormat, Hyperparameters: spec.Hyperparameters, Queue: queue,
 		Namespace: s.cfg.Namespace, Region: s.cfg.Region, Bucket: s.cfg.Bucket, FencingTable: s.cfg.FencingTable,
-		ProgressTable: s.cfg.ProgressTable, KafkaBootstrap: s.cfg.KafkaBootstrap, KafkaTopic: s.cfg.KafkaTopic,
+		KafkaBootstrap: s.cfg.KafkaBootstrap, KafkaTopic: s.cfg.KafkaTopic,
 		Settings: s.cfg.Settings,
 	})
 	if err != nil {
@@ -553,8 +554,7 @@ func (s *JobService) report(ctx context.Context, e model.SubmittedEvent) {
 	}
 }
 
-// List returns queue state merged with progress, newest first.
-// Progress is best-effort: a DynamoDB error still returns the queue state.
+// List returns the jobs on the management cluster with their Kafka view (status · progress), newest first.
 func (s *JobService) List(ctx context.Context) ([]model.Job, error) {
 	statuses, err := s.sched.List(ctx)
 	if err != nil {
@@ -564,19 +564,12 @@ func (s *JobService) List(ctx context.Context) ([]model.Job, error) {
 	for i, st := range statuses {
 		ids[i] = st.ID
 	}
-	progress, err := s.progress.Get(ctx, ids)
-	if err != nil {
-		slog.Warn("progress lookup failed", "err", err)
-		progress = nil
-	}
+	views := s.views.Views(ids)
 
 	jobs := make([]model.Job, len(statuses))
 	for i, st := range statuses {
-		jobs[i] = model.Job{JobStatus: st, UpdatedAt: st.CreatedAt}
-		if p, ok := progress[st.ID]; ok {
-			jobs[i].Progress = &p
-			jobs[i].UpdatedAt = p.UpdatedAt
-		}
+		v, ok := views[st.ID]
+		jobs[i] = jobview.Merge(st, v, ok)
 	}
 	sort.SliceStable(jobs, func(a, b int) bool { return jobs[a].CreatedAt.After(jobs[b].CreatedAt) })
 	return jobs, nil

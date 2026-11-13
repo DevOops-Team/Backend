@@ -1,4 +1,4 @@
-// Package repository is the data-access layer: S3 (job inputs), DynamoDB (progress, timeline)
+// Package repository is the data-access layer: S3 (job inputs), DynamoDB (fencing), Kafka (job.lifecycle)
 // and the on-prem management cluster (JobSets, Kueue Workloads, Events).
 //
 // On the management cluster MultiKueue owns the JobSet (spec.managedBy) and mirrors the worker's JobSet status back,
