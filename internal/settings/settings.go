@@ -39,7 +39,7 @@ type PriorityClasses struct {
 	Training string `json:"training"`
 }
 
-// Images: Trainer (training environment, this repo's trainer/; train.py is uploaded per job) and
+// Images: Trainer (training environment, Data repo trainer/; train.py is uploaded per job) and
 // Checkpoint (ckpt-init · ckpt-sidecar, Data repo checkpoint/) normally come from the TRAINER_IMAGE · CHECKPOINT_IMAGE env (WithImages),
 // so the deploy bot can pin their digests without a backend build.
 type Images struct {
