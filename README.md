@@ -40,7 +40,7 @@ Frontend ◀── 폴링 ── Backend ◀── Kafka job.lifecycle 구독 (�
 | `FENCING_TABLE` | `devoops-prod-fencing` | 세대 · owner · 승인본 (ADR-6) |
 | `KAFKA_BOOTSTRAP` | 비어 있음 | `job.lifecycle` 브로커. Backend가 job.submitted를 보내고 토픽 전체를 읽어 화면 상태를 만든다. 비우면 둘 다 안 함(상태는 관리 클러스터만). JobSet의 ckpt-sidecar에도 넘김 |
 | `KAFKA_TOPIC_LIFECYCLE` | `job.lifecycle` | |
-| `TRAINER_IMAGE` | (필수) | `ghcr.io/devoops-team/trainer@sha256:…` (이 레포 `trainer/`, 봇이 Gitops에 digest) |
+| `TRAINER_IMAGE` | (필수) | `ghcr.io/devoops-team/trainer@sha256:…` (Data 레포 `trainer/`, 봇이 Gitops에 digest) |
 | `CHECKPOINT_IMAGE` | (필수) | `ghcr.io/devoops-team/checkpoint@sha256:…` (Data `checkpoint/`) |
 | `TRAINING_NAMESPACE` | `training` | |
 | `AWS_REGION` | `us-east-2` | AWS 자격은 SDK 기본 체인 |
@@ -60,7 +60,6 @@ internal/service/jobview    Kafka job.lifecycle 사건 → 잡별 상태 · 진�
 internal/service/timeline   Kubernetes Event · Workload → 타임라인
 internal/repository/        S3 · 관리 클러스터 · DynamoDB(펜싱) · Kafka(발행 · 구독) · 메모리 타임라인
 internal/settings/          default.json
-trainer/                    Dockerfile = 학습 환경 이미지 (ghcr.io/devoops-team/trainer), train.py = 기본 학습 코드 (업로드용 예시)
 api/openapi.yaml            API 명세 (테스트가 Gin 라우트와 비교)
 ```
 
@@ -68,9 +67,8 @@ api/openapi.yaml            API 명세 (테스트가 Gin 라우트와 비교)
 
 ```sh
 go test -race ./...                         # 순수 로직 (설정 · 간격 계산 · JobSet 렌더링 · 봉투 · 라우트 ↔ 명세)
-python3 -m unittest trainer/test_train.py   # train.py 순수 함수
 ```
 
 외부 시스템(S3 · DynamoDB · 관리 클러스터 · Kafka)을 가짜로 바꾸는 테스트는 두지 않는다. 동작은 실제 인프라에 배포해 확인한다.
 
-CI(`.github/workflows/ci.yml`): PR · develop push는 lint · 테스트 · 이미지 빌드(push 안 함). main push는 `ghcr.io/devoops-team/backend`(그리고 `trainer/`가 바뀌었으면 `ghcr.io/devoops-team/trainer`)를 push하고, 봇이 Gitops `onprem/platform/backend/overlays/onprem`의 digest를 갱신한다 (ADR-23).
+CI(`.github/workflows/ci.yml`): PR · develop push는 lint · 테스트 · 이미지 빌드(push 안 함). main push는 `ghcr.io/devoops-team/backend`를 push하고, 봇이 Gitops `onprem/platform/backend/overlays/onprem`의 digest를 갱신한다 (ADR-23).
