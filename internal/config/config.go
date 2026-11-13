@@ -10,8 +10,8 @@ type Config struct {
 	Region        string // AWS_REGION
 	Bucket        string // S3_BUCKET (required): the checkpoint bucket (ADR-14: one bucket for code, datasets, jobs)
 	FencingTable  string // FENCING_TABLE: generation · owner · approved checkpoint (ADR-6)
-	ProgressTable string // PROGRESS_TABLE: per-step progress the progress-reporter writes
-	// KAFKA_BOOTSTRAP: brokers for job.lifecycle ("host:port,..."). Empty = no events (local runs).
+	// KAFKA_BOOTSTRAP: brokers for job.lifecycle ("host:port,..."): the backend publishes job.submitted
+	// and reads the topic for status · progress. Empty = no events (local runs).
 	// Also passed to the ckpt-sidecar in the JobSet.
 	KafkaBootstrap string
 	KafkaTopic     string // KAFKA_TOPIC_LIFECYCLE
@@ -40,7 +40,6 @@ func Load(getenv func(string) string) (Config, error) {
 		Region:         get("AWS_REGION", "us-east-2"),
 		Bucket:         getenv("S3_BUCKET"),
 		FencingTable:   get("FENCING_TABLE", "devoops-prod-fencing"),
-		ProgressTable:  get("PROGRESS_TABLE", "devoops-prod-job-progress"),
 		KafkaBootstrap: getenv("KAFKA_BOOTSTRAP"),
 		KafkaTopic:     get("KAFKA_TOPIC_LIFECYCLE", "job.lifecycle"),
 		Kubeconfig:     getenv("KUBECONFIG"),
