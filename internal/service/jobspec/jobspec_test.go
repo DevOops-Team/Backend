@@ -179,7 +179,7 @@ func TestRenderRunsTrainPyFromTheTrainerImageAndKeepsStopExitCode(t *testing.T) 
 	for _, want := range []string{
 		"torchrun --nnodes=2 --nproc-per-node=1 --node-rank=\"$JOB_COMPLETION_INDEX\"",
 		"--master-addr=job-3f9a1c2e-g0001-workers-0-0.job-3f9a1c2e-g0001", "--master-port=29500",
-		"/opt/train/train.py", `if [ -f "$CKPT_DIR/STOP" ]; then exit 75; fi`,
+		"/data/code/train.py", `if [ -f "$CKPT_DIR/STOP" ]; then exit 75; fi`,
 	} {
 		if !strings.Contains(args, want) {
 			t.Errorf("args missing %q:\n%s", want, args)
