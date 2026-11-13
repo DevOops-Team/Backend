@@ -71,7 +71,7 @@ type EventWriter interface {
 }
 
 // Upload is one file part of a submission: Field "model" (Path inside the folder, starting with the
-// folder's name) or "data" (a .jsonl file name).
+// folder's name), "data" (a .jsonl file name) or "train" (the user's training script, a .py file name).
 type Upload struct {
 	Field string
 	Path  string
@@ -94,6 +94,12 @@ const (
 	manifestSchema   = 1
 	manifestName     = "manifest.json"
 	modelConfigName  = "model/config.json" // every Hugging Face model folder has it
+
+	// The user's train.py rides in the dataset so ckpt-init downloads it (sha256 checked) to
+	// /data/code/train.py with the model and data; a copy under code/<id>/ is what the file viewer shows.
+	trainName     = "code/train.py"
+	trainCodeName = "train.py"
+	MaxTrainBytes = 1 << 20 // a script, not a model
 )
 
 var (
@@ -172,13 +178,14 @@ func (s *JobService) Options() model.TrainingOptions {
 		GPUs:            model.GPURange(tr.GPUs),
 		DatasetFormat:   tr.DatasetFormat,
 		Hyperparameters: hyper,
-		Limits:          model.UploadLimits{MaxModelBytes: st.Limits.MaxModelBytes, MaxDataBytes: st.Limits.MaxDataBytes, MaxFiles: st.Limits.MaxFiles},
+		Limits: model.UploadLimits{MaxModelBytes: st.Limits.MaxModelBytes, MaxDataBytes: st.Limits.MaxDataBytes,
+			MaxTrainBytes: MaxTrainBytes, MaxFiles: st.Limits.MaxFiles},
 		Checkpoint: model.CheckpointDefaults{SizeFactor: st.Checkpoint.SizeFactor, WriteBytesPerSecond: st.Checkpoint.WriteBytesPerSecond,
 			MTBFSeconds: st.Checkpoint.MTBFSeconds, MinIntervalSeconds: st.Checkpoint.MinIntervalSeconds},
 	}
 }
 
-// Submit validates the spec, streams the model folder and the data files to S3, writes the dataset
+// Submit validates the spec, streams the model folder, the data files and train.py to S3, writes the dataset
 // manifest, config.json and jobset.json, creates the fencing item and the JobSet, and reports
 // job.submitted. The spec is checked before any upload, so a rejected request writes nothing; a
 // failure later leaves the uploaded objects (the backend may not delete) but never submits a JobSet.
@@ -262,7 +269,7 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 	for _, f := range []struct {
 		name string
 		body []byte
-	}{{"config.json", configBytes}, {"jobset.json", jobsetBytes}} {
+	}{{trainCodeName, up.train}, {"config.json", configBytes}, {"jobset.json", jobsetBytes}} {
 		if err := s.objects.Put(ctx, "code/"+id+"/"+f.name, bytes.NewReader(f.body)); err != nil {
 			return model.CreatedJob{}, upstream("upload "+f.name, err)
 		}
@@ -300,6 +307,7 @@ type received struct {
 	modelName             string
 	entries               []model.ManifestEntry
 	modelBytes, dataBytes int64
+	train                 []byte // train.py, also stored in the dataset as code/train.py
 }
 
 // receive streams each part to S3 under prefix while hashing it, and enforces the limits.
@@ -338,6 +346,14 @@ func (s *JobService) receive(ctx context.Context, prefix string, src UploadSourc
 				return received{}, invalid("training data must be .jsonl files: " + u.Path)
 			}
 			name, budget = "data/"+u.Path, lim.MaxDataBytes-r.dataBytes
+		case "train":
+			if !safeName(u.Path) || !strings.HasSuffix(u.Path, ".py") {
+				return received{}, invalid("training code must be one .py file: " + u.Path)
+			}
+			if seen[trainName] {
+				return received{}, invalid("only one training code file (train.py) can be uploaded")
+			}
+			name, budget = trainName, MaxTrainBytes
 		default:
 			return received{}, invalid("unknown upload field: " + u.Field)
 		}
@@ -346,10 +362,15 @@ func (s *JobService) receive(ctx context.Context, prefix string, src UploadSourc
 		}
 		seen[name] = true
 
-		body := &meteredReader{r: u.Body, left: budget, hash: sha256.New()}
+		var copied bytes.Buffer // train.py is kept for its code/<id>/ copy; it is at most MaxTrainBytes
+		src := u.Body
+		if u.Field == "train" {
+			src = io.TeeReader(u.Body, &copied)
+		}
+		body := &meteredReader{r: src, left: budget, hash: sha256.New()}
 		if err := s.objects.Put(ctx, prefix+name, body); err != nil {
 			if body.over {
-				return received{}, tooLarge(fmt.Sprintf("%s upload is over the limit (%d bytes)", u.Field, map[string]int64{"model": lim.MaxModelBytes, "data": lim.MaxDataBytes}[u.Field]))
+				return received{}, tooLarge(fmt.Sprintf("%s upload is over the limit (%d bytes)", u.Field, map[string]int64{"model": lim.MaxModelBytes, "data": lim.MaxDataBytes, "train": MaxTrainBytes}[u.Field]))
 			}
 			if body.readErr != nil {
 				return received{}, invalid("read upload " + name + ": " + body.readErr.Error())
@@ -357,10 +378,13 @@ func (s *JobService) receive(ctx context.Context, prefix string, src UploadSourc
 			return received{}, upstream("upload "+name, err)
 		}
 		r.entries = append(r.entries, model.ManifestEntry{Name: name, SHA256: hex.EncodeToString(body.hash.Sum(nil)), SizeBytes: body.n})
-		if u.Field == "model" {
+		switch u.Field {
+		case "model":
 			r.modelBytes += body.n
-		} else {
+		case "data":
 			r.dataBytes += body.n
+		case "train":
+			r.train = copied.Bytes()
 		}
 	}
 
@@ -370,6 +394,11 @@ func (s *JobService) receive(ctx context.Context, prefix string, src UploadSourc
 	}
 	if !slices.ContainsFunc(r.entries, func(e model.ManifestEntry) bool { return strings.HasPrefix(e.Name, "data/") }) {
 		fields = append(fields, model.FieldError{Field: "data", Message: ".jsonl 학습 데이터가 1개 이상 필요합니다"})
+	}
+	if !seen[trainName] {
+		fields = append(fields, model.FieldError{Field: "train", Message: "학습 코드(train.py)가 필요합니다"})
+	} else if len(r.train) == 0 {
+		fields = append(fields, model.FieldError{Field: "train", Message: "학습 코드(train.py)가 비어 있습니다"})
 	}
 	if len(fields) > 0 {
 		return received{}, invalidFields(fields)

@@ -39,6 +39,7 @@ type HyperparameterDef struct {
 type UploadLimits struct {
 	MaxModelBytes int64 `json:"maxModelBytes"`
 	MaxDataBytes  int64 `json:"maxDataBytes"`
+	MaxTrainBytes int64 `json:"maxTrainBytes"`
 	MaxFiles      int   `json:"maxFiles"`
 }
 

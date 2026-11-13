@@ -19,8 +19,8 @@ type Config struct {
 	KubeContext    string // KUBE_CONTEXT: empty = current context
 	Namespace      string // TRAINING_NAMESPACE: must match 50-management
 	SettingsPath   string // BACKEND_SETTINGS: empty = embedded internal/settings/default.json
-	// TRAINER_IMAGE (train.py, this repo's trainer/) and CHECKPOINT_IMAGE (ckpt-init · ckpt-sidecar, Data
-	// repo checkpoint/) for the training JobSet. Gitops sets them and the deploy bot pins the digests,
+	// TRAINER_IMAGE (training environment, this repo's trainer/; train.py is uploaded per job) and
+	// CHECKPOINT_IMAGE (ckpt-init · ckpt-sidecar, Data repo checkpoint/) for the training JobSet. Gitops sets them and the deploy bot pins the digests,
 	// so a new image needs no backend build. Empty = the settings file value.
 	TrainerImage    string
 	CheckpointImage string
