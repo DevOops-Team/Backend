@@ -405,7 +405,7 @@ components:
         strategy: { type: string }
         gpus: { type: integer }
         status: { $ref: "#/components/schemas/Status" }
-        statusMessage: { type: string, description: 대기 이유 등 Kueue 메시지, 실패 · 재배치 이유 }
+        statusMessage: { type: string, description: "대기 이유 등 Kueue 메시지, 실패 · 재배치 이유" }
         generation: { type: integer }
         jobsetName: { type: string }
         queue: { type: string }
