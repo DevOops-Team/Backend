@@ -5,8 +5,8 @@
 // Pod (rank r, GPU 1):
 //
 //	[init]    ckpt-init          generation · owner check, config.json → /code, dataset → /data, approved checkpoint → /ckpt
-//	[sidecar] ckpt-sidecar       /ckpt → S3, rank 0: manifest · approval · heartbeat · Kafka checkpoint.approved
-//	[sidecar] progress-reporter  /progress/progress.json → DynamoDB progress table
+//	[sidecar] ckpt-sidecar       /ckpt → S3, rank 0: manifest · approval · heartbeat · Kafka checkpoint.approved,
+//	                             /progress/progress.json → Kafka job.progress (GPU-141 · GPU-146)
 //	[main]    trainer            torchrun /opt/train/train.py (inside the trainer image)
 //
 // The uploaded model folder is part of the dataset (/data/model), so ckpt-init needs no model URI.
@@ -22,6 +22,13 @@ import (
 
 	"github.com/DevOops-Team/Backend/internal/model"
 	"github.com/DevOops-Team/Backend/internal/settings"
+)
+
+// train.py (rank 0) overwrites its progress here; the ckpt-sidecar reads it and sends job.progress.
+const (
+	progressVolume = "progress"
+	progressDir    = "/progress"
+	progressFile   = progressDir + "/progress.json"
 )
 
 const (
@@ -61,7 +68,6 @@ type Input struct {
 	Region                string
 	Bucket                string
 	FencingTable          string
-	ProgressTable         string
 	KafkaBootstrap        string
 	KafkaTopic            string
 	Settings              settings.Settings
@@ -141,9 +147,6 @@ func renderPod(in Input, name, generation string) map[string]any {
 	pod := in.Settings.Pod
 	group := map[string]any{"matchLabels": map[string]any{model.GPUGroupLabel: model.GPUGroupValue}}
 	inits := []any{ckptInit(in, generation), ckptSidecar(in, generation)}
-	if in.ProgressTable != "" {
-		inits = append(inits, progressSidecar(in, generation))
-	}
 	spec := map[string]any{
 		"restartPolicy":                 "Never",
 		"terminationGracePeriodSeconds": pod.TerminationGraceSeconds, // 긴급 저장 없음, 주기 저장만

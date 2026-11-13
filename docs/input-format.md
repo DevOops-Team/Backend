@@ -61,7 +61,6 @@
 | Pod 라벨 `devoops/gpu-group: train`, zone affinity, hostname anti-affinity, `nvidia.com/gpu` toleration | 사용자 값 뒤에 추가 |
 | 볼륨 `s3-code`·`s3-datasets`·`s3-checkpoints`·`progress`, 모든 컨테이너의 마운트 `/code`·`/data`·`/ckpt`·`/progress` | 추가. **같은 이름의 볼륨이나 같은 경로의 마운트를 쓰면 안 된다** (Kubernetes가 거부) |
 | env `JOB_ID`, `PROGRESS_FILE`, `CODE_DIR`, `DATA_DIR`, `CKPT_DIR`, `AWS_REGION`, `AWS_DEFAULT_REGION` | 같은 이름이 있으면 **덮어쓴다** |
-| `initContainers`에 `progress-reporter` sidecar | 추가 |
 
 자세한 이유는 [README `jobspec.Prepare`](../README.md#1-작업-제출-post-apijobs) 표를 본다.
 
@@ -79,7 +78,7 @@
 
 ### 진행 상태 파일
 
-DDP라면 rank 0만 쓴다. 임시 파일에 쓰고 `os.replace`로 바꾼다(emptyDir라 가능). sidecar가 2초마다 읽어 바뀌었으면 DynamoDB `devoops-job-progress`에 그대로 덮어쓴다.
+DDP라면 rank 0만 쓴다. 임시 파일에 쓰고 `os.replace`로 바꾼다(emptyDir라 가능). ckpt-sidecar가 읽어 바뀌었으면 약 30초 간격으로 Kafka `job.lifecycle`에 `job.progress`로 보내고, Backend가 그 최신 값을 화면에 보여 준다 (GPU-146).
 
 ```json
 {"status": "RUNNING", "step": 1200, "total_steps": 5000, "loss": 0.0123, "last_checkpoint_step": 1000}

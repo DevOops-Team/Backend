@@ -10,8 +10,8 @@ Frontend ──multipart(spec + model/* + data/*)──▶ Backend (온프레 pl
    ③ DynamoDB 펜싱 첫 항목 (generation 1)
    ④ 관리 클러스터에 JobSet 제출 → Kueue → dispatcher → MultiKueue → EKS
    ⑤ Kafka job.lifecycle ← job.submitted
-EKS 학습 Pod: ckpt-init(데이터 · 모델 받기) → trainer(train.py) + ckpt-sidecar(체크포인트 승인 · Kafka) + progress-reporter(DynamoDB)
-Frontend ◀── 폴링 ── Backend ◀── Kueue · JobSet 상태 + DynamoDB 진행률
+EKS 학습 Pod: ckpt-init(데이터 · 모델 받기) → trainer(train.py) + ckpt-sidecar(체크포인트 승인 · 진행률 → Kafka)
+Frontend ◀── 폴링 ── Backend ◀── Kafka job.lifecycle 구독 (상태 · 진행률 · 체크포인트) + 관리 클러스터 JobSet(이름 · 설정)
 ```
 
 ## API
@@ -20,11 +20,11 @@ Frontend ◀── 폴링 ── Backend ◀── Kueue · JobSet 상태 + Dyna
 |---|---|
 | `GET /api/training/options` | 방식 · GPU 범위 · 하이퍼파라미터 기본값과 범위 · 업로드 상한 · 체크포인트 계산 기본값 |
 | `POST /api/jobs` | multipart. 첫 파트 `spec`(JSON), 이어서 `model/<폴더>/<경로>` 파일들(`config.json` 필수), `data/<파일>.jsonl` 1개 이상. 경로는 파트 **이름**에 넣는다 |
-| `GET /api/jobs` · `/api/jobs/{id}` | 상태(Kueue · JobSet) + 진행률(DynamoDB) |
-| `GET /api/jobs/{id}/events` | 관리 클러스터 타임라인(메모리, 레플리카별) |
+| `GET /api/jobs` · `/api/jobs/{id}` | 관리 클러스터 JobSet + Kafka `job.lifecycle`로 만든 상태 · 진행률 · 마지막 체크포인트 |
+| `GET /api/jobs/{id}/events` | 타임라인: Kafka 사건(제출 · 입장 · 배치 · 시작 · 체크포인트 · 종료) + 관리 클러스터 Event (메모리) |
 | `GET /api/jobs/{id}/files` · `/files/{kind}/{name}` | `code/<id>/`의 config.json · jobset.json, 업로드 manifest.json 앞부분 |
 
-오류는 `{"error","code","fields"}`: 400 입력 · 409 중복 · 413 업로드 상한 초과 · 502 S3 · 관리 클러스터 · DynamoDB.
+오류는 `{"error","code","fields"}`: 400 입력 · 409 중복 · 413 업로드 상한 초과 · 502 S3 · 관리 클러스터 · DynamoDB(펜싱).
 
 ## 체크포인트 간격
 
@@ -38,8 +38,7 @@ Frontend ◀── 폴링 ── Backend ◀── Kueue · JobSet 상태 + Dyna
 |---|---|---|
 | `S3_BUCKET` | (필수) | 체크포인트 버킷 하나에 code · datasets · jobs (ADR-14) |
 | `FENCING_TABLE` | `devoops-prod-fencing` | 세대 · owner · 승인본 (ADR-6) |
-| `PROGRESS_TABLE` | `devoops-prod-job-progress` | progress-reporter가 쓰는 진행률 |
-| `KAFKA_BOOTSTRAP` | 비어 있음 | `job.lifecycle` 브로커. 비우면 사건을 보내지 않음. JobSet의 ckpt-sidecar에도 넘김 |
+| `KAFKA_BOOTSTRAP` | 비어 있음 | `job.lifecycle` 브로커. Backend가 job.submitted를 보내고 토픽 전체를 읽어 화면 상태를 만든다. 비우면 둘 다 안 함(상태는 관리 클러스터만). JobSet의 ckpt-sidecar에도 넘김 |
 | `KAFKA_TOPIC_LIFECYCLE` | `job.lifecycle` | |
 | `TRAINER_IMAGE` | (필수) | `ghcr.io/devoops-team/trainer@sha256:…` (이 레포 `trainer/`, 봇이 Gitops에 digest) |
 | `CHECKPOINT_IMAGE` | (필수) | `ghcr.io/devoops-team/checkpoint@sha256:…` (Data `checkpoint/`) |
@@ -56,9 +55,10 @@ cmd/api/                    배선 (config → repository → service → handle
 internal/handler/           Gin, multipart 스트리밍 → service.UploadSource
 internal/service/           제출 · 조회 로직
 internal/service/ckptpolicy Young/Daly 간격
-internal/service/jobspec    합의안 JobSet 렌더링 (ckpt-init · ckpt-sidecar · progress-reporter · trainer)
+internal/service/jobspec    합의안 JobSet 렌더링 (ckpt-init · ckpt-sidecar · trainer)
+internal/service/jobview    Kafka job.lifecycle 사건 → 잡별 상태 · 진행률 · 타임라인 (GPU-146)
 internal/service/timeline   Kubernetes Event · Workload → 타임라인
-internal/repository/        S3 · 관리 클러스터 · DynamoDB(진행률 · 펜싱) · Kafka · 메모리 타임라인
+internal/repository/        S3 · 관리 클러스터 · DynamoDB(펜싱) · Kafka(발행 · 구독) · 메모리 타임라인
 internal/settings/          default.json
 trainer/                    train.py + Dockerfile (ghcr.io/devoops-team/trainer)
 api/openapi.yaml            API 명세 (테스트가 Gin 라우트와 비교)

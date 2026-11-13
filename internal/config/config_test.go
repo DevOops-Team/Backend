@@ -17,7 +17,6 @@ func TestLoadUsesDefaultsMatchingProdInfra(t *testing.T) {
 		Region:        "us-east-2",
 		Bucket:        "devoops-bucket",
 		FencingTable:  "devoops-prod-fencing",
-		ProgressTable: "devoops-prod-job-progress",
 		KafkaTopic:    "job.lifecycle",
 		Namespace:     "training",
 	}
@@ -33,7 +32,6 @@ func TestLoadReadsEveryVariable(t *testing.T) {
 		"AWS_REGION":            "ap-northeast-2",
 		"S3_BUCKET":             "b",
 		"FENCING_TABLE":         "f",
-		"PROGRESS_TABLE":        "p",
 		"KAFKA_BOOTSTRAP":       "172.30.0.40:9092",
 		"KAFKA_TOPIC_LIFECYCLE": "t",
 		"KUBECONFIG":            "/kube/config",
@@ -48,7 +46,7 @@ func TestLoadReadsEveryVariable(t *testing.T) {
 	}
 	want := Config{
 		ListenAddr: ":9090", AllowedOrigin: "https://app.example", Region: "ap-northeast-2", Bucket: "b",
-		FencingTable: "f", ProgressTable: "p", KafkaBootstrap: "172.30.0.40:9092", KafkaTopic: "t",
+		FencingTable: "f", KafkaBootstrap: "172.30.0.40:9092", KafkaTopic: "t",
 		Kubeconfig: "/kube/config", KubeContext: "ctx", Namespace: "ns", SettingsPath: "/etc/settings.json",
 		TrainerImage: "ghcr.io/devoops-team/trainer@sha256:t", CheckpointImage: "ghcr.io/devoops-team/checkpoint@sha256:c",
 	}

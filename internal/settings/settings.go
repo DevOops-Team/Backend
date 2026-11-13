@@ -44,7 +44,7 @@ type PriorityClasses struct {
 // so the deploy bot can pin their digests without a backend build.
 type Images struct {
 	Trainer    string `json:"trainer,omitempty"`
-	Checkpoint string `json:"checkpoint,omitempty"` // also runs the progress-reporter sidecar (Python + boto3)
+	Checkpoint string `json:"checkpoint,omitempty"` // ckpt-init · ckpt-sidecar
 }
 
 type Pod struct {
