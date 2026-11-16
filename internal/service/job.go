@@ -252,7 +252,7 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 	js, err := jobspec.Render(jobspec.Input{
 		JobID: id, Generation: firstGeneration, Name: name, Model: up.modelName, Strategy: strategy, GPUs: spec.GPUs,
 		DatasetID: id, DatasetVersion: datasetVersion, DatasetManifestSHA256: manifestSHA, ConfigSHA256: configSHA,
-		CheckpointFormat: checkpointFormat, Hyperparameters: spec.Hyperparameters, Queue: queue,
+		CheckpointFormat: checkpointFormat, Hyperparameters: spec.Hyperparameters, ExpID: spec.ExpID, Queue: queue,
 		Namespace: s.cfg.Namespace, Region: s.cfg.Region, Bucket: s.cfg.Bucket, FencingTable: s.cfg.FencingTable,
 		KafkaBootstrap: s.cfg.KafkaBootstrap, KafkaTopic: s.cfg.KafkaTopic,
 		Settings: s.cfg.Settings,
@@ -291,7 +291,8 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 	now := s.cfg.Now().UTC()
 	s.report(ctx, model.SubmittedEvent{
 		JobID: id, Generation: firstGeneration, JobsetName: js.GetName(), GPUs: spec.GPUs, Strategy: strategy,
-		Queue: queue, ConfigSHA256: configSHA, ImageDigest: digestOf(s.cfg.Settings.Images.Trainer), OccurredAt: now,
+		Queue: queue, ConfigSHA256: configSHA, ImageDigest: digestOf(s.cfg.Settings.Images.Trainer), ExpID: spec.ExpID,
+		OccurredAt: now,
 	})
 
 	slog.Info("job submitted", "id", id, "name", js.GetName(), "model", up.modelName, "strategy", strategy,

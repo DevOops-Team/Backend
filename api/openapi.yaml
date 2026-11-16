@@ -327,6 +327,12 @@ components:
           description: options의 hyperparameters 키만. 비우면 기본값
           additionalProperties: true
           example: { epochs: 3 }
+        exp_id:
+          type: string
+          description: >-
+            실험 ID (잡 투입기, GPU-172). 선택. job.submitted payload `exp_id`와 JobSet 주석 `devoops/exp-id`로 넘겨
+            collector가 실험과 잡을 잇는다. 투입기 · 데이터 DB와 같은 이름이라 snake_case다
+          example: exp-20261116-a
 
     TrainConfig:
       type: object

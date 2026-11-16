@@ -321,3 +321,20 @@ func toStrings(v any) []string {
 	}
 	return out
 }
+
+// GPU-172: exp_id는 JobSet 주석으로 남겨 jobset.json(복구 원본)을 따라 재배치된 세대에도 유지된다.
+func TestRenderAnnotatesTheExperimentID(t *testing.T) {
+	in := input(t)
+	in.ExpID = "exp-20261116-a"
+	ann := at(t, doc(t, in), "metadata", "annotations").(map[string]any)
+	if ann["devoops/exp-id"] != "exp-20261116-a" {
+		t.Errorf("annotation devoops/exp-id = %v, want exp-20261116-a", ann["devoops/exp-id"])
+	}
+}
+
+func TestRenderOmitsTheExperimentAnnotationWhenNotGiven(t *testing.T) {
+	ann := at(t, doc(t, input(t)), "metadata", "annotations").(map[string]any)
+	if _, ok := ann["devoops/exp-id"]; ok {
+		t.Errorf("annotation devoops/exp-id = %v, want none for a job outside an experiment", ann["devoops/exp-id"])
+	}
+}

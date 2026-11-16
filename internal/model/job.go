@@ -133,6 +133,9 @@ type SubmitSpec struct {
 	Strategy        string         `json:"strategy"`
 	GPUs            int            `json:"gpus"`
 	Hyperparameters map[string]any `json:"hyperparameters"`
+	// ExpID is the experiment the job belongs to (잡 투입기, GPU-172). Optional; it goes to job.submitted
+	// and the JobSet annotation devoops/exp-id so the collector links the experiment and the job.
+	ExpID string `json:"exp_id,omitempty"`
 }
 
 // TrainConfig is config.json. train.py rejects missing and unknown keys, so every key is always written.

@@ -36,6 +36,7 @@ type SubmittedEvent struct {
 	Queue        string
 	ConfigSHA256 string
 	ImageDigest  string // trainer image digest, "" when the image is not pinned
+	ExpID        string // experiment the job belongs to (잡 투입기, GPU-172); "" outside an experiment
 	OccurredAt   time.Time
 }
 
