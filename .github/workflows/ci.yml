@@ -1,6 +1,9 @@
 # 협업 규칙 §7 CI 파이프라인.
 #   PR(→ develop, → main), develop push : 린트(Go · OpenAPI) · 테스트 · 빌드 + 이미지 빌드 (push 안 함)
-#   main push(머지)             : 같은 검사 → 이미지 push  ghcr.io/devoops-team/backend:{main, sha-<7자리>}
+#   main push(머지)             : 같은 검사 → 릴리스 버전 계산 → 이미지 push  ghcr.io/devoops-team/backend:{X.Y.Z, X.Y, main, sha-<7자리>}
+#                                 → 버전 봇이 태그 vX.Y.Z · Release 생성 → 배포 봇이 Gitops overlay에 X.Y.Z@digest 반영
+#   버전 · description은 develop → main PR 본문의 '## 릴리스 노트'에서 나온다 (GPU-136, 형식은 .github/pull_request_template.md).
+#   main 머지 커밋이 PR 머지가 아니거나 릴리스 노트가 없으면 이미지 push · 배포를 하지 않는다.
 #   trainer 이미지(ghcr.io/devoops-team/trainer)는 Data 레포 trainer/에서 빌드 · 배포한다 (GPU-154)
 name: CI
 
@@ -21,6 +24,14 @@ env:
   IMAGE: ghcr.io/devoops-team/backend
 
 jobs:
+  # 버전 계산 (main push에서만 release=true). 로직은 Gitops 재사용 워크플로.
+  plan:
+    name: version
+    uses: DevOops-Team/Gitops/.github/workflows/release-plan.yml@main
+    permissions:
+      contents: read
+      pull-requests: read
+
   check:
     name: lint · test · build
     runs-on: ubuntu-latest
@@ -42,7 +53,7 @@ jobs:
 
   image:
     name: image
-    needs: check
+    needs: [check, plan]
     runs-on: ubuntu-latest
     outputs:
       image: ${{ env.IMAGE }}
@@ -51,7 +62,7 @@ jobs:
       contents: read
       packages: write
     env:
-      PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
@@ -67,8 +78,14 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
+            type=semver,pattern={{version}},value=${{ needs.plan.outputs.version }},enable=${{ env.PUSH }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.plan.outputs.version }},enable=${{ env.PUSH }}
             type=raw,value=main
             type=sha,prefix=sha-,format=short
+          labels: |
+            ${{ env.PUSH == 'true' && format('org.opencontainers.image.description={0}', needs.plan.outputs.description) || '' }}
+          annotations: |
+            ${{ env.PUSH == 'true' && format('org.opencontainers.image.description={0}', needs.plan.outputs.description) || '' }}
       - id: build
         uses: docker/build-push-action@v7
         with:
@@ -78,22 +95,34 @@ jobs:
           push: ${{ env.PUSH == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # GPU-114 · ADR-23: main 이미지 digest를 Gitops overlay에 반영한다.
-  # 로직은 Gitops 재사용 워크플로 한 곳에 있다. 값은 Variables(DEPLOY_APP_ID · GITOPS_REPO · GITOPS_OVERLAY)와
-  # Secret(DEPLOY_APP_PRIVATE_KEY)에서 받고, digest는 image job 출력을 쓴다.
+  # GPU-136: 이미지 push가 끝난 뒤 버전 봇이 태그 vX.Y.Z · Release를 만든다.
+  #   Variable VERSION_APP_ID, 비밀키는 Environment release(main만)의 Secret VERSION_APP_PRIVATE_KEY.
+  release:
+    name: release
+    needs: [plan, image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true'
+    uses: DevOops-Team/Gitops/.github/workflows/release-publish.yml@main
+    with:
+      tag: ${{ needs.plan.outputs.tag }}
+      notes: ${{ needs.plan.outputs.notes }}
+      app-id: ${{ vars.VERSION_APP_ID }}
+
+  # GPU-114 · ADR-23: main 이미지 X.Y.Z@digest를 Gitops overlay에 반영한다.
+  # 로직은 Gitops 재사용 워크플로 한 곳에 있다. 값은 Variables(DEPLOY_APP_ID · GITOPS_REPO · GITOPS_OVERLAY),
+  # 비밀키는 Environment gitops-deploy(main만)의 Secret DEPLOY_APP_PRIVATE_KEY (GPU-136).
   deploy:
     name: gitops deploy
-    needs: image
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [plan, image, release]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true'
     uses: DevOops-Team/Gitops/.github/workflows/update-image.yml@main
     with:
       image: ${{ needs.image.outputs.image }}
       digest: ${{ needs.image.outputs.digest }}
+      version: ${{ needs.plan.outputs.version }}
       overlay: ${{ vars.GITOPS_OVERLAY }}
       app-id: ${{ vars.DEPLOY_APP_ID }}
       gitops-repo: ${{ vars.GITOPS_REPO }}
-    secrets:
-      app-private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
