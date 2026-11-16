@@ -71,4 +71,11 @@ go test -race ./...                         # 순수 로직 (설정 · 간격 �
 
 외부 시스템(S3 · DynamoDB · 관리 클러스터 · Kafka)을 가짜로 바꾸는 테스트는 두지 않는다. 동작은 실제 인프라에 배포해 확인한다.
 
-CI(`.github/workflows/ci.yml`): PR · develop push는 lint · 테스트 · 이미지 빌드(push 안 함). main push는 `ghcr.io/devoops-team/backend`를 push하고, 봇이 Gitops `onprem/platform/backend/overlays/onprem`의 digest를 갱신한다 (ADR-23).
+CI(`.github/workflows/ci.yml`): PR · develop push는 lint · 테스트 · 이미지 빌드(push 안 함). develop → main PR 머지 때만 버전을 붙여 배포한다 (ADR-40, GPU-136).
+
+1. PR 본문(GitHub PR 설명 칸)의 `## 릴리스 노트`로 다음 버전을 계산한다. 형식은 `.github/pull_request_template.md`, 검사는 main 필수 검사 `release-notes / release notes`.
+2. `ghcr.io/devoops-team/backend:{X.Y.Z, X.Y, main, sha-<7자리>}`를 push한다. description 라벨은 릴리스 노트 요약(Jira 키 포함)이다.
+3. 버전 봇이 태그 `vX.Y.Z`와 GitHub Release를 만든다.
+4. 배포 봇이 Gitops `onprem/platform/backend/overlays/onprem`에 `newTag: X.Y.Z` + digest를 반영한다.
+
+릴리스 노트가 없는 main 머지는 이미지를 push하지 않는다. 버전 규칙과 봇 권한은 Gitops `tools/release/README.md`.
