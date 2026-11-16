@@ -1,273 +1,161 @@
-// Package jobview folds Kafka job.lifecycle events into what the screens show per job (GPU-146):
-// status · worker · progress · last approved checkpoint of the latest generation, plus timeline entries.
+// Package jobview turns what the data database records about a job into what the screens show:
+// status · worker · progress · last approved checkpoint of the latest generation, plus timeline rows.
 //
-// Every backend replica reads the whole topic from the start, so all replicas hold the same views and
-// a restart rebuilds them (retention 7 days). Producers:
+// The backend no longer folds Kafka job.lifecycle itself (GPU-146). The collector (Data repo) stores
+// every event in PostgreSQL gpuf_data, and the backend reads it as backend_ro (Data db/004):
 //
-//	backend        job.submitted
-//	job-watcher    job.admitted · job.placed · job.started/resumed · job.completed/failed/fenced/stopped
-//	ckpt-sidecar   job.progress (about every 30 s) · checkpoint.approved
+//	data.v_job_status   latest generation per job + progress + last approved checkpoint → FromStatus
+//	data.job_runs       one row per generation (submitted · started · ended)            → History
+//	data.checkpoints    approved checkpoints                                            → History
 //
-// Events are deduplicated by event_id; within a generation the status only moves forward, because the
-// producers are independent and records can arrive slightly out of order (placed before admitted).
+// So every replica shows the same thing and a restart loses nothing. The backend still publishes
+// job.submitted to Kafka; the collector turns it into the job_runs row.
 package jobview
 
 import (
-	"context"
 	"fmt"
-	"log/slog"
-	"math"
+	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/DevOops-Team/Backend/internal/model"
 )
 
-// EventWriter stores timeline entries (repository.Timeline).
-type EventWriter interface {
-	Put(ctx context.Context, e model.JobEvent) error
-}
-
-// statusOf maps a lifecycle event type to the job status it means.
+// statusOf maps v_job_status.state to the API status.
 var statusOf = map[string]model.Status{
-	"job.submitted": model.StatusQueued,
-	"job.admitted":  model.StatusAdmitted,
-	"job.placed":    model.StatusAdmitted,
-	"job.started":   model.StatusRunning,
-	"job.resumed":   model.StatusRunning,
-	"job.completed": model.StatusSucceeded,
-	"job.failed":    model.StatusFailed,
-	"job.fenced":    model.StatusRecovering,
-	"job.stopped":   model.StatusCancelled,
+	"PENDING":   model.StatusQueued,
+	"RUNNING":   model.StatusRunning,
+	"COMPLETED": model.StatusSucceeded,
+	"FAILED":    model.StatusFailed,
+	"FENCED":    model.StatusRecovering, // the relocator took the generation down; the next one follows
+	"STOPPED":   model.StatusCancelled,
+	"CANCELLED": model.StatusCancelled,
 }
 
-type job struct {
-	view     model.JobView
-	progress *model.Progress // latest job.progress of view.Generation
-	ckpt     int64           // highest checkpoint.approved step of view.Generation
+// FromStatus turns a v_job_status row into the job's view. An unknown state leaves Status empty, so
+// Merge keeps the management cluster's status.
+func FromStatus(r model.StatusRow) model.JobView {
+	v := model.JobView{Generation: r.Generation, Status: statusOf[r.State], Cluster: deref(r.Cluster)}
+	for _, t := range []*time.Time{r.SubmittedAt, r.StartedAt, r.EndedAt, r.ProgressUpdatedAt, r.LastApprovedAt} {
+		if t != nil && t.After(v.UpdatedAt) {
+			v.UpdatedAt = *t
+		}
+	}
+	if r.Step == nil && r.LastApprovedStep == nil {
+		return v
+	}
+	p := model.Progress{Generation: int64(r.Generation), UpdatedAt: v.UpdatedAt}
+	if r.Step != nil {
+		p.Status = deref(r.ProgressStatus)
+		p.Step = *r.Step
+		p.TotalSteps = deref(r.TotalSteps)
+		p.Loss = deref(r.Loss)
+		if r.ProgressUpdatedAt != nil {
+			p.UpdatedAt = *r.ProgressUpdatedAt
+		}
+	}
+	// The approved checkpoint (any generation) is where recovery resumes from, so it is what the
+	// screen calls the last checkpoint.
+	p.LastCheckpointStep = deref(r.LastApprovedStep)
+	v.Progress = &p
+	return v
 }
 
-// Store holds the views; safe for one writer (the Kafka consumer) and many readers (requests).
-type Store struct {
-	timeline EventWriter // nil = no timeline entries
-
-	mu   sync.RWMutex
-	seen map[string]struct{}
-	jobs map[string]*job
-}
-
-func New(timeline EventWriter) *Store {
-	return &Store{timeline: timeline, seen: map[string]struct{}{}, jobs: map[string]*job{}}
-}
-
-// Apply folds one event in. It returns false for an event_id it has already applied.
-func (s *Store) Apply(ctx context.Context, e model.LifecycleEvent) bool {
-	if e.JobID == "" {
-		return false
-	}
-	s.mu.Lock()
-	if _, dup := s.seen[e.EventID]; dup {
-		s.mu.Unlock()
-		return false
-	}
-	s.seen[e.EventID] = struct{}{}
-	s.fold(e)
-	s.mu.Unlock()
-
-	if entry, ok := timelineEntry(e); ok && s.timeline != nil {
-		if err := s.timeline.Put(ctx, entry); err != nil {
-			slog.Warn("record lifecycle event", "id", e.JobID, "type", e.Type, "err", err)
-		}
-	}
-	return true
-}
-
-func (s *Store) fold(e model.LifecycleEvent) {
-	j := s.jobs[e.JobID]
-	if j == nil {
-		j = &job{}
-		s.jobs[e.JobID] = j
-	}
-	switch {
-	case e.Generation < j.view.Generation:
-		return // a late event of a generation that was already replaced
-	case e.Generation > j.view.Generation:
-		*j = job{view: model.JobView{Generation: e.Generation}}
-	}
-	v := &j.view
-
-	switch e.Type {
-	case "job.progress":
-		if j.progress != nil && e.OccurredAt.Before(j.progress.UpdatedAt) {
-			return
-		}
-		j.progress = &model.Progress{
-			Status:             str(e.Payload, "status"),
-			Generation:         int64(e.Generation),
-			Step:               num(e.Payload, "step"),
-			TotalSteps:         num(e.Payload, "total_steps"),
-			Loss:               float(e.Payload, "loss"),
-			LastCheckpointStep: num(e.Payload, "last_checkpoint_step"),
-			UpdatedAt:          e.OccurredAt,
-		}
-	case "checkpoint.approved":
-		j.ckpt = max(j.ckpt, num(e.Payload, "step"))
-	default:
-		st, ok := statusOf[e.Type]
-		if !ok {
-			return
-		}
-		if v.Status == "" || model.StatusRank(st) > model.StatusRank(v.Status) {
-			v.Status = st
-			v.Message = message(e)
-		}
-	}
-	if e.Cluster != "" {
-		v.Cluster = e.Cluster
-	}
-	if e.OccurredAt.After(v.UpdatedAt) {
-		v.UpdatedAt = e.OccurredAt
-	}
-}
-
-// Views returns the views of the given jobs that have any event.
-func (s *Store) Views(ids []string) map[string]model.JobView {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make(map[string]model.JobView, len(ids))
-	for _, id := range ids {
-		j, ok := s.jobs[id]
-		if !ok {
-			continue
-		}
-		v := j.view
-		if j.progress != nil || j.ckpt > 0 {
-			p := model.Progress{Generation: int64(v.Generation), UpdatedAt: v.UpdatedAt}
-			if j.progress != nil {
-				p = *j.progress
+// History returns the job's timeline rows from its generations and approved checkpoints, oldest first.
+// Keys follow the timeline format "<time>#<cluster>#<id>" so they merge with the management-cluster rows.
+func History(jobID string, runs []model.RunRecord, ckpts []model.CheckpointRecord) []model.JobEvent {
+	var out []model.JobEvent
+	clusterOf := map[int]string{}
+	for _, r := range runs {
+		cluster := deref(r.Cluster)
+		clusterOf[r.Generation] = cluster
+		object := fmt.Sprintf("JobSet/%s", model.JobSetName(jobID, r.Generation))
+		if r.SubmittedAt != nil {
+			// The backend records its own submission with this key (service.report); share it.
+			suffix := "submitted"
+			if r.Generation > 1 {
+				suffix = fmt.Sprintf("submitted-g%04d", r.Generation)
 			}
-			p.LastCheckpointStep = max(p.LastCheckpointStep, j.ckpt)
-			v.Progress = &p
+			msg := "submitted"
+			if q := deref(r.Queue); q != "" {
+				msg = "submitted to queue " + q
+			}
+			out = append(out, row(jobID, *r.SubmittedAt, model.ManagerCluster, suffix, "backend", "Submitted", msg, "Normal", object))
 		}
-		out[id] = v
+		if r.StartedAt != nil {
+			reason, msg := "Started", "training started"
+			if r.Generation > 1 {
+				reason, msg = "Resumed", "resumed from the last approved checkpoint"
+			}
+			out = append(out, row(jobID, *r.StartedAt, orManager(cluster), fmt.Sprintf("started-g%04d", r.Generation),
+				"job-watcher", reason, msg, "Normal", object))
+		}
+		if r.EndedAt != nil {
+			end := deref(r.EndReason)
+			reason, typ := endReason(end)
+			out = append(out, row(jobID, *r.EndedAt, orManager(cluster), fmt.Sprintf("ended-g%04d", r.Generation),
+				"job-watcher", reason, end, typ, object))
+		}
 	}
+	for _, c := range ckpts {
+		out = append(out, row(jobID, c.ApprovedAt, orManager(clusterOf[c.Generation]),
+			fmt.Sprintf("checkpoint-g%04d-s%d", c.Generation, c.Step), "ckpt-sidecar", "CheckpointApproved",
+			fmt.Sprintf("checkpoint step %d approved", c.Step), "Normal",
+			"JobSet/"+model.JobSetName(jobID, c.Generation)))
+	}
+	slices.SortStableFunc(out, func(a, b model.JobEvent) int { return strings.Compare(a.Key, b.Key) })
 	return out
 }
 
-// message is the human reason of an end event; "" for the others.
-func message(e model.LifecycleEvent) string {
-	switch e.Type {
-	case "job.failed":
-		return str(e.Payload, "message")
-	case "job.fenced":
-		if id := str(e.Payload, "request_id"); id != "" {
-			return fmt.Sprintf("relocation %s (%s)", id, str(e.Payload, "action"))
-		}
+func endReason(end string) (reason, typ string) {
+	switch end {
+	case "completed":
+		return "Completed", "Normal"
+	case "failed":
+		return "Failed", "Warning"
+	case "fenced":
+		return "Fenced", "Warning"
+	case "stopped", "cancelled":
+		return "Stopped", "Warning"
 	}
-	return ""
+	return "Ended", "Normal"
 }
 
-// timelineEntry turns a status or checkpoint event into a timeline row. job.progress stays out: it
-// arrives every 30 s and is already shown as the progress bar.
-func timelineEntry(e model.LifecycleEvent) (model.JobEvent, bool) {
-	if e.Type == "job.progress" {
-		return model.JobEvent{}, false
+func row(jobID string, at time.Time, cluster, suffix, source, reason, msg, typ, object string) model.JobEvent {
+	t := at.UTC().Truncate(time.Millisecond)
+	return model.JobEvent{
+		JobID: jobID, Key: t.Format(model.EventKeyTimeFormat) + "#" + cluster + "#" + suffix,
+		Time: t, LastTime: t, Cluster: cluster, Source: source, Reason: reason, Message: msg,
+		Type: typ, Object: object, Count: 1,
 	}
-	if _, ok := statusOf[e.Type]; !ok && e.Type != "checkpoint.approved" {
-		return model.JobEvent{}, false
-	}
-	cluster, suffix := e.Cluster, e.EventID
+}
+
+func orManager(cluster string) string {
 	if cluster == "" {
-		cluster = model.ManagerCluster
+		return model.ManagerCluster
 	}
-	if e.Type == "job.submitted" {
-		// The backend records its own submission with this key (service.report); share it so the
-		// entry is written once.
-		cluster, suffix = model.ManagerCluster, "submitted"
-	}
-	t := e.OccurredAt.UTC().Truncate(time.Millisecond)
-	entry := model.JobEvent{
-		JobID:    e.JobID,
-		Key:      t.Format(model.EventKeyTimeFormat) + "#" + cluster + "#" + suffix,
-		Time:     t,
-		LastTime: t,
-		Cluster:  cluster,
-		Source:   e.Source,
-		Reason:   reason(e.Type),
-		Message:  describe(e),
-		Type:     "Normal",
-		Object:   fmt.Sprintf("JobSet/job-%s-g%04d", e.JobID, e.Generation),
-		Count:    1,
-	}
-	switch e.Type {
-	case "job.failed", "job.fenced", "job.stopped":
-		entry.Type = "Warning"
-	}
-	return entry, true
+	return cluster
 }
 
-// reason turns "job.started" into "Started" and "checkpoint.approved" into "CheckpointApproved".
-func reason(typ string) string {
-	if typ == "checkpoint.approved" {
-		return "CheckpointApproved"
+func deref[T any](p *T) T {
+	var zero T
+	if p == nil {
+		return zero
 	}
-	name := strings.TrimPrefix(typ, "job.")
-	return strings.ToUpper(name[:1]) + name[1:]
+	return *p
 }
-
-func describe(e model.LifecycleEvent) string {
-	switch e.Type {
-	case "job.submitted":
-		return "submitted to queue " + str(e.Payload, "queue")
-	case "job.admitted":
-		return "Kueue admitted the workload"
-	case "job.placed":
-		return "MultiKueue placed it on " + e.Cluster
-	case "job.started":
-		return "all pods ready, training started"
-	case "job.resumed":
-		return "all pods ready, resumed from the last checkpoint"
-	case "job.completed":
-		return "JobSet completed"
-	case "job.stopped":
-		return "stopped"
-	case "checkpoint.approved":
-		return fmt.Sprintf("checkpoint step %d approved", num(e.Payload, "step"))
-	}
-	if m := message(e); m != "" {
-		return m
-	}
-	return strings.TrimPrefix(e.Type, "job.")
-}
-
-func str(p map[string]any, k string) string {
-	s, _ := p[k].(string)
-	return s
-}
-
-// JSON numbers decode as float64.
-func float(p map[string]any, k string) float64 {
-	f, _ := p[k].(float64)
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return 0
-	}
-	return f
-}
-
-func num(p map[string]any, k string) int64 { return int64(float(p, k)) }
 
 // Merge combines what the management cluster says about a job (JobSet · Workload: names, settings, the
-// reason it still waits) with its Kafka view. The view wins for its generation, except that the
-// status never goes back: if the cluster is already further (the watcher lags by a moment, or its
-// events are not in the topic any more), the cluster's status stays.
+// reason it still waits) with its database view. The view wins for its generation, except that the
+// status never goes back: if the cluster is already further (the collector lags by a moment), the
+// cluster's status stays.
 func Merge(st model.JobStatus, v model.JobView, ok bool) model.Job {
 	j := model.Job{JobStatus: st, UpdatedAt: st.CreatedAt}
 	if !ok || v.Generation < st.Generation {
 		return j
 	}
 	if v.Generation > st.Generation {
-		j.Generation = v.Generation // the next generation is announced before its JobSet is listed
+		j.Generation = v.Generation // the next generation is recorded before its JobSet is listed
 		j.Status, j.Message, j.Cluster = v.Status, v.Message, v.Cluster
 	} else if v.Status != "" && model.StatusRank(v.Status) >= model.StatusRank(st.Status) {
 		j.Status = v.Status

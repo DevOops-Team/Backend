@@ -3,8 +3,9 @@
 // It takes a multipart job submission from the frontend (settings + a Hugging Face model folder +
 // jsonl training data), streams the files to S3, writes config.json and jobset.json, creates the
 // fencing item and submits the JobSet to the management cluster, where Kueue · MultiKueue and the
-// dispatcher send it to an EKS worker. It reports job.submitted to Kafka and reads the whole
-// job.lifecycle topic back for the screens' status, progress and timeline.
+// dispatcher send it to an EKS worker. It reports job.submitted to Kafka; the collector stores every
+// job.lifecycle event in the data database, which the backend reads for the screens' status, progress
+// and timeline.
 //
 // main only wires dependencies: config → repository → service → handler.
 package main
@@ -31,7 +32,6 @@ import (
 	"github.com/DevOops-Team/Backend/internal/model"
 	"github.com/DevOops-Team/Backend/internal/repository"
 	"github.com/DevOops-Team/Backend/internal/service"
-	"github.com/DevOops-Team/Backend/internal/service/jobview"
 	"github.com/DevOops-Team/Backend/internal/service/timeline"
 	"github.com/DevOops-Team/Backend/internal/settings"
 )
@@ -73,11 +73,11 @@ func run() error {
 	}
 	defer lifecycle.Close()
 	timelineStore := repository.NewTimeline(500)
-	feed, err := repository.NewFeed(cfg.KafkaBootstrap, cfg.KafkaTopic)
+	records, err := repository.NewJobRecords(ctx, cfg.DatabaseHost)
 	if err != nil {
 		return err
 	}
-	views := jobview.New(timelineStore)
+	defer records.Close()
 
 	jobs := service.NewJobService(service.Config{
 		Namespace:      cfg.Namespace,
@@ -91,15 +91,13 @@ func run() error {
 	}, service.Deps{
 		Objects:   repository.NewObjects(s3.NewFromConfig(awsCfg), cfg.Bucket),
 		Scheduler: kube,
-		Views:     views,
+		Records:   records,
 		Fencing:   repository.NewFencing(db, cfg.FencingTable),
 		Lifecycle: lifecycle,
 		Events:    timelineStore,
 		Record:    timelineStore,
 	})
 
-	// Kafka job.lifecycle → status · progress · checkpoint · timeline (GPU-146)
-	go feed.Run(ctx, views.Apply)
 	// Management-cluster steps (Kueue quota, MultiKueue dispatch, finish) for the job timeline.
 	go timeline.NewTracker(kube, timelineStore, model.ManagerCluster).Run(ctx, 2*time.Second)
 
@@ -120,7 +118,8 @@ func run() error {
 	}()
 
 	slog.Info("listening", "addr", srv.Addr, "bucket", cfg.Bucket, "namespace", cfg.Namespace,
-		"trainer", jobSettings.Images.Trainer, "checkpoint", jobSettings.Images.Checkpoint, "kafka", cfg.KafkaBootstrap)
+		"trainer", jobSettings.Images.Trainer, "checkpoint", jobSettings.Images.Checkpoint, "kafka", cfg.KafkaBootstrap,
+		"database", cfg.DatabaseHost)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

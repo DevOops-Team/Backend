@@ -44,10 +44,12 @@ type Scheduler interface {
 	List(ctx context.Context) ([]model.JobStatus, error)
 }
 
-// JobViews is what Kafka job.lifecycle says about each job: status, worker, progress, last checkpoint
-// (service/jobview, GPU-146).
-type JobViews interface {
-	Views(ids []string) map[string]model.JobView
+// JobRecords reads what the data database recorded about jobs (Kafka job.lifecycle → collector →
+// PostgreSQL gpuf_data, read as backend_ro): status · worker · progress · last approved checkpoint, and
+// each generation and checkpoint for the timeline (service/jobview).
+type JobRecords interface {
+	Statuses(ctx context.Context, ids []string) ([]model.StatusRow, error)
+	History(ctx context.Context, jobID string) ([]model.RunRecord, []model.CheckpointRecord, error)
 }
 
 // Fencing creates the job's first fencing item (DynamoDB); model.ErrAlreadyExists if it exists.
@@ -124,7 +126,7 @@ type JobService struct {
 	cfg       Config
 	objects   ObjectStore
 	sched     Scheduler
-	views     JobViews
+	records   JobRecords
 	fencing   Fencing
 	lifecycle Lifecycle
 	events    EventReader
@@ -135,7 +137,7 @@ type JobService struct {
 type Deps struct {
 	Objects   ObjectStore
 	Scheduler Scheduler
-	Views     JobViews
+	Records   JobRecords
 	Fencing   Fencing
 	Lifecycle Lifecycle
 	Events    EventReader
@@ -146,7 +148,7 @@ func NewJobService(cfg Config, d Deps) *JobService {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &JobService{cfg: cfg, objects: d.Objects, sched: d.Scheduler, views: d.Views, fencing: d.Fencing,
+	return &JobService{cfg: cfg, objects: d.Objects, sched: d.Scheduler, records: d.Records, fencing: d.Fencing,
 		lifecycle: d.Lifecycle, events: d.Events, record: d.Record}
 }
 
@@ -252,7 +254,7 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 	js, err := jobspec.Render(jobspec.Input{
 		JobID: id, Generation: firstGeneration, Name: name, Model: up.modelName, Strategy: strategy, GPUs: spec.GPUs,
 		DatasetID: id, DatasetVersion: datasetVersion, DatasetManifestSHA256: manifestSHA, ConfigSHA256: configSHA,
-		CheckpointFormat: checkpointFormat, Hyperparameters: spec.Hyperparameters, Queue: queue,
+		CheckpointFormat: checkpointFormat, Hyperparameters: spec.Hyperparameters, ExpID: spec.ExpID, Queue: queue,
 		Namespace: s.cfg.Namespace, Region: s.cfg.Region, Bucket: s.cfg.Bucket, FencingTable: s.cfg.FencingTable,
 		KafkaBootstrap: s.cfg.KafkaBootstrap, KafkaTopic: s.cfg.KafkaTopic,
 		Settings: s.cfg.Settings,
@@ -291,7 +293,8 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 	now := s.cfg.Now().UTC()
 	s.report(ctx, model.SubmittedEvent{
 		JobID: id, Generation: firstGeneration, JobsetName: js.GetName(), GPUs: spec.GPUs, Strategy: strategy,
-		Queue: queue, ConfigSHA256: configSHA, ImageDigest: digestOf(s.cfg.Settings.Images.Trainer), OccurredAt: now,
+		Queue: queue, ConfigSHA256: configSHA, ImageDigest: digestOf(s.cfg.Settings.Images.Trainer), ExpID: spec.ExpID,
+		OccurredAt: now,
 	})
 
 	slog.Info("job submitted", "id", id, "name", js.GetName(), "model", up.modelName, "strategy", strategy,
@@ -583,7 +586,8 @@ func (s *JobService) report(ctx context.Context, e model.SubmittedEvent) {
 	}
 }
 
-// List returns the jobs on the management cluster with their Kafka view (status · progress), newest first.
+// List returns the jobs on the management cluster with their database view (status · progress), newest
+// first. The database is best-effort: when it is down the jobs still show the cluster's state.
 func (s *JobService) List(ctx context.Context) ([]model.Job, error) {
 	statuses, err := s.sched.List(ctx)
 	if err != nil {
@@ -593,7 +597,14 @@ func (s *JobService) List(ctx context.Context) ([]model.Job, error) {
 	for i, st := range statuses {
 		ids[i] = st.ID
 	}
-	views := s.views.Views(ids)
+	views := map[string]model.JobView{}
+	rows, err := s.records.Statuses(ctx, ids)
+	if err != nil {
+		slog.Warn("read job status from the data database", "err", err)
+	}
+	for _, r := range rows {
+		views[r.JobID] = jobview.FromStatus(r)
+	}
 
 	jobs := make([]model.Job, len(statuses))
 	for i, st := range statuses {
@@ -633,7 +644,9 @@ func (s *JobService) Get(ctx context.Context, id string) (model.Job, error) {
 	return job, nil
 }
 
-// Events returns the job's delivery timeline, oldest first.
+// Events returns the job's delivery timeline, oldest first: the management-cluster steps the backend
+// tracks (Kueue · MultiKueue · Kubernetes events) and, from the data database, each generation's
+// submission · start · end and the approved checkpoints. Rows with the same key appear once.
 func (s *JobService) Events(ctx context.Context, id string) ([]model.JobEvent, error) {
 	if !validJobID.MatchString(id) {
 		return nil, invalid("invalid job id")
@@ -642,10 +655,24 @@ func (s *JobService) Events(ctx context.Context, id string) ([]model.JobEvent, e
 	if err != nil {
 		return nil, upstream("list events", err)
 	}
-	if events == nil {
-		events = []model.JobEvent{}
+	runs, ckpts, err := s.records.History(ctx, id)
+	if err != nil {
+		slog.Warn("read job history from the data database", "id", id, "err", err)
 	}
-	return events, nil
+	byKey := map[string]model.JobEvent{}
+	for _, e := range jobview.History(id, runs, ckpts) {
+		byKey[e.Key] = e
+	}
+	for _, e := range events { // the backend's own rows win (they carry counts and messages from the cluster)
+		byKey[e.Key] = e
+	}
+	out := make([]model.JobEvent, 0, len(byKey))
+	for _, e := range byKey {
+		out = append(out, e)
+	}
+	// Keys start with a fixed-width UTC time, so they sort in time order.
+	slices.SortFunc(out, func(a, b model.JobEvent) int { return strings.Compare(a.Key, b.Key) })
+	return out, nil
 }
 
 // Files returns the job's code files and the manifest of the files it uploaded.

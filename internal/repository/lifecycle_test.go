@@ -64,3 +64,29 @@ func TestSubmittedEnvelopeLeavesClusterOut(t *testing.T) {
 		t.Error("cluster is the worker that runs the job (collector job_runs.cluster); the backend does not know it yet")
 	}
 }
+
+// GPU-172: 잡 투입기가 보낸 exp_id로 collector가 job_runs.exp_id를 채워 실험과 잡을 잇는다.
+func TestSubmittedPayloadCarriesTheExperimentID(t *testing.T) {
+	_, body, err := submittedRecord(model.SubmittedEvent{JobID: "x", Generation: 1, ExpID: "exp-20261116-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Payload map[string]any `json:"payload"`
+	}
+	_ = json.Unmarshal(body, &got)
+	if got.Payload["exp_id"] != "exp-20261116-a" {
+		t.Errorf("payload.exp_id = %v, want exp-20261116-a", got.Payload["exp_id"])
+	}
+}
+
+func TestSubmittedPayloadLeavesExperimentIDOutWhenNotGiven(t *testing.T) {
+	_, body, _ := submittedRecord(model.SubmittedEvent{JobID: "x", Generation: 1})
+	var got struct {
+		Payload map[string]any `json:"payload"`
+	}
+	_ = json.Unmarshal(body, &got)
+	if _, ok := got.Payload["exp_id"]; ok {
+		t.Errorf("payload.exp_id = %v, want no key for a job outside an experiment", got.Payload["exp_id"])
+	}
+}

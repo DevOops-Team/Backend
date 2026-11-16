@@ -80,6 +80,17 @@ type envelope struct {
 // submittedRecord returns the message key (job id: one partition per job keeps its order) and body.
 // event_id is fixed per job generation, so a retry is stored once.
 func submittedRecord(e model.SubmittedEvent) (string, []byte, error) {
+	payload := map[string]any{
+		"jobset_name":   e.JobsetName,
+		"gpus":          e.GPUs,
+		"strategy":      e.Strategy,
+		"queue":         e.Queue,
+		"config_sha256": e.ConfigSHA256,
+		"image_digest":  e.ImageDigest,
+	}
+	if e.ExpID != "" { // collector: job_runs.exp_id (GPU-172)
+		payload["exp_id"] = e.ExpID
+	}
 	body, err := json.Marshal(envelope{
 		EventID:       fmt.Sprintf("submitted-%s-g%04d", e.JobID, e.Generation),
 		SchemaVersion: 1,
@@ -88,14 +99,7 @@ func submittedRecord(e model.SubmittedEvent) (string, []byte, error) {
 		Source:        "backend",
 		JobID:         e.JobID,
 		Generation:    e.Generation,
-		Payload: map[string]any{
-			"jobset_name":   e.JobsetName,
-			"gpus":          e.GPUs,
-			"strategy":      e.Strategy,
-			"queue":         e.Queue,
-			"config_sha256": e.ConfigSHA256,
-			"image_digest":  e.ImageDigest,
-		},
+		Payload:       payload,
 	})
 	if err != nil {
 		return "", nil, fmt.Errorf("encode job.submitted: %w", err)
