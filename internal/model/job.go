@@ -105,7 +105,46 @@ type Progress struct {
 	UpdatedAt          time.Time `json:"updatedAt"`
 }
 
-// JobView is what Kafka job.lifecycle says about a job's latest generation (service/jobview).
+// StatusRow is one row of data.v_job_status (Data db/003_job_progress.sql, read as backend_ro): a job's
+// latest generation with its progress and the last approved checkpoint. Nullable columns are pointers.
+type StatusRow struct {
+	JobID             string
+	Generation        int
+	ExpID             *string
+	Cluster           *string
+	State             string // PENDING · RUNNING · COMPLETED · FAILED · FENCED · STOPPED · CANCELLED
+	SubmittedAt       *time.Time
+	StartedAt         *time.Time // first step finished
+	EndedAt           *time.Time
+	RecoveryCount     int64
+	ProgressStatus    *string
+	Step              *int64
+	TotalSteps        *int64
+	Loss              *float64
+	ProgressUpdatedAt *time.Time
+	LastApprovedStep  *int64
+	LastApprovedAt    *time.Time
+}
+
+// RunRecord is one generation of a job (data.job_runs).
+type RunRecord struct {
+	Generation  int
+	Cluster     *string
+	Queue       *string
+	SubmittedAt *time.Time // null for generations the relocator resubmitted (only job.resumed)
+	StartedAt   *time.Time
+	EndedAt     *time.Time
+	EndReason   *string // completed · failed · fenced · stopped · cancelled
+}
+
+// CheckpointRecord is one approved checkpoint (data.checkpoints).
+type CheckpointRecord struct {
+	Generation int
+	Step       int64
+	ApprovedAt time.Time
+}
+
+// JobView is what the data database says about a job's latest generation (service/jobview).
 type JobView struct {
 	Generation int
 	Status     Status // "" until a status event arrives (only progress seen)

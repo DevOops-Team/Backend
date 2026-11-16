@@ -1,196 +1,120 @@
 package jobview
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"github.com/DevOops-Team/Backend/internal/model"
 )
 
-type timeline struct{ events []model.JobEvent }
-
-func (t *timeline) Put(_ context.Context, e model.JobEvent) error {
-	t.events = append(t.events, e)
-	return nil
-}
-
 var t0 = time.Date(2026, 11, 13, 0, 14, 3, 855_000_000, time.UTC)
 
-func ev(id, typ string, gen int, after time.Duration, payload map[string]any) model.LifecycleEvent {
-	src := map[string]string{
-		"job.submitted": "backend", "job.progress": "ckpt-sidecar", "checkpoint.approved": "ckpt-sidecar",
-	}[typ]
-	if src == "" {
-		src = "job-watcher"
-	}
-	cluster := "eks-a"
-	if typ == "job.submitted" {
-		cluster = ""
-	}
-	return model.LifecycleEvent{
-		EventID: id, Type: typ, OccurredAt: t0.Add(after), Source: src, Cluster: cluster,
-		JobID: "0cb3b0c3", Generation: gen, Payload: payload,
-	}
-}
+func ptr[T any](v T) *T { return &v }
 
-func view(t *testing.T, s *Store, id string) model.JobView {
-	t.Helper()
-	v, ok := s.Views([]string{id})[id]
-	if !ok {
-		t.Fatalf("no view for %s", id)
-	}
-	return v
-}
-
-// The real 11/13 sequence of job 0cb3b0c3, including placed arriving before admitted.
-func TestStatusFollowsTheLifecycle(t *testing.T) {
-	s := New(nil)
-	steps := []struct {
-		e    model.LifecycleEvent
-		want model.Status
-	}{
-		{ev("submitted-0cb3b0c3-g0001", "job.submitted", 1, 0, nil), model.StatusQueued},
-		{ev("job-0cb3b0c3-g0001-placed", "job.placed", 1, 7*time.Second, nil), model.StatusAdmitted},
-		{ev("job-0cb3b0c3-g0001-admitted", "job.admitted", 1, 7*time.Second, nil), model.StatusAdmitted},
-		{ev("job-0cb3b0c3-g0001-started", "job.started", 1, 25*time.Second, nil), model.StatusRunning},
-		{ev("job-0cb3b0c3-g0001-end", "job.completed", 1, 5*time.Minute, nil), model.StatusSucceeded},
-	}
-	for _, st := range steps {
-		s.Apply(context.Background(), st.e)
-		if got := view(t, s, "0cb3b0c3").Status; got != st.want {
-			t.Fatalf("after %s: status %s, want %s", st.e.Type, got, st.want)
-		}
-	}
-	v := view(t, s, "0cb3b0c3")
-	if v.Cluster != "eks-a" || v.Generation != 1 {
-		t.Errorf("cluster %q generation %d", v.Cluster, v.Generation)
-	}
-	if !v.UpdatedAt.Equal(t0.Add(5 * time.Minute)) {
-		t.Errorf("updatedAt %v", v.UpdatedAt)
-	}
-}
-
-func TestStatusNeverMovesBackwardsWithinAGeneration(t *testing.T) {
-	s := New(nil)
-	s.Apply(context.Background(), ev("job-x-g0001-end", "job.completed", 1, time.Minute, nil))
-	s.Apply(context.Background(), ev("job-x-g0001-started", "job.started", 1, 0, nil))
-	if got := view(t, s, "0cb3b0c3").Status; got != model.StatusSucceeded {
-		t.Errorf("status %s, want SUCCEEDED", got)
-	}
-}
-
-func TestEndEvents(t *testing.T) {
-	cases := []struct {
-		typ     string
-		payload map[string]any
-		want    model.Status
-		message string
-	}{
-		{"job.failed", map[string]any{"message": "BackoffLimitExceeded"}, model.StatusFailed, "BackoffLimitExceeded"},
-		{"job.stopped", nil, model.StatusCancelled, ""},
-		{"job.fenced", map[string]any{"request_id": "rr-1", "action": "MIGRATE"}, model.StatusRecovering, "relocation rr-1 (MIGRATE)"},
-	}
-	for _, c := range cases {
-		s := New(nil)
-		s.Apply(context.Background(), ev("job-x-g0001-started", "job.started", 1, 0, nil))
-		s.Apply(context.Background(), ev("job-x-g0001-end", c.typ, 1, time.Minute, c.payload))
-		v := view(t, s, "0cb3b0c3")
-		if v.Status != c.want || v.Message != c.message {
-			t.Errorf("%s: %s %q, want %s %q", c.typ, v.Status, v.Message, c.want, c.message)
+// v_job_status.state (Data db/003) → the API status.
+func TestFromStatusMapsTheDatabaseState(t *testing.T) {
+	for state, want := range map[string]model.Status{
+		"PENDING":   model.StatusQueued,
+		"RUNNING":   model.StatusRunning,
+		"COMPLETED": model.StatusSucceeded,
+		"FAILED":    model.StatusFailed,
+		"FENCED":    model.StatusRecovering,
+		"STOPPED":   model.StatusCancelled,
+		"CANCELLED": model.StatusCancelled,
+	} {
+		v := FromStatus(model.StatusRow{JobID: "0cb3b0c3", Generation: 1, State: state, SubmittedAt: &t0})
+		if v.Status != want {
+			t.Errorf("state %s → %s, want %s", state, v.Status, want)
 		}
 	}
 }
 
-// A relocation resubmits the job as generation 2: the view moves on and starts over.
-func TestNewGenerationReplacesTheOldOne(t *testing.T) {
-	s := New(nil)
-	s.Apply(context.Background(), ev("job-x-g0001-end", "job.fenced", 1, 0, nil))
-	s.Apply(context.Background(), ev("p1", "job.progress", 1, 0, map[string]any{"step": 500.0, "total_steps": 2080.0}))
-	s.Apply(context.Background(), ev("job-x-g0002-submitted", "job.submitted", 2, time.Minute, nil))
-	v := view(t, s, "0cb3b0c3")
-	if v.Generation != 2 || v.Status != model.StatusQueued || v.Progress != nil {
-		t.Fatalf("got gen %d status %s progress %v", v.Generation, v.Status, v.Progress)
-	}
-	// late events of generation 1 no longer change the view
-	s.Apply(context.Background(), ev("job-x-g0001-late", "job.started", 1, 2*time.Minute, nil))
-	if v := view(t, s, "0cb3b0c3"); v.Status != model.StatusQueued {
-		t.Errorf("old generation moved status to %s", v.Status)
+func TestFromStatusLeavesAnUnknownStateEmpty(t *testing.T) {
+	// Merge then keeps the management cluster's status instead of guessing.
+	if v := FromStatus(model.StatusRow{JobID: "x", Generation: 1, State: "SOMETHING_NEW"}); v.Status != "" {
+		t.Errorf("status = %s, want empty", v.Status)
 	}
 }
 
-func TestProgressAndCheckpoint(t *testing.T) {
-	s := New(nil)
-	s.Apply(context.Background(), ev("p19", "job.progress", 1, 55*time.Second, map[string]any{
-		"status": "RUNNING", "step": 19.0, "total_steps": 208.0, "loss": 3.25, "last_checkpoint_step": 0.0,
-	}))
-	// an older value that arrives late is ignored
-	s.Apply(context.Background(), ev("p0", "job.progress", 1, 24*time.Second, map[string]any{"step": 0.0, "total_steps": 208.0}))
-	s.Apply(context.Background(), ev("ck69", "checkpoint.approved", 1, 2*time.Minute, map[string]any{"step": 69.0}))
-
-	p := view(t, s, "0cb3b0c3").Progress
+func TestFromStatusCarriesWorkerProgressAndApprovedCheckpoint(t *testing.T) {
+	v := FromStatus(model.StatusRow{
+		JobID: "0cb3b0c3", Generation: 2, State: "RUNNING", Cluster: ptr("eks-b"), RecoveryCount: 1,
+		SubmittedAt: &t0, StartedAt: ptr(t0.Add(time.Minute)),
+		ProgressStatus: ptr("RUNNING"), Step: ptr(int64(120)), TotalSteps: ptr(int64(208)), Loss: ptr(2.5),
+		ProgressUpdatedAt: ptr(t0.Add(3 * time.Minute)),
+		LastApprovedStep:  ptr(int64(100)), LastApprovedAt: ptr(t0.Add(2 * time.Minute)),
+	})
+	if v.Generation != 2 || v.Cluster != "eks-b" {
+		t.Errorf("generation %d cluster %q", v.Generation, v.Cluster)
+	}
+	p := v.Progress
 	if p == nil {
-		t.Fatal("no progress")
+		t.Fatal("progress = nil")
 	}
-	if p.Step != 19 || p.TotalSteps != 208 || p.Loss != 3.25 || p.Status != "RUNNING" || p.Generation != 1 {
-		t.Errorf("progress %+v", *p)
+	if p.Status != "RUNNING" || p.Generation != 2 || p.Step != 120 || p.TotalSteps != 208 || p.Loss != 2.5 ||
+		p.LastCheckpointStep != 100 || !p.UpdatedAt.Equal(t0.Add(3*time.Minute)) {
+		t.Errorf("progress = %+v", *p)
 	}
-	if p.LastCheckpointStep != 69 {
-		t.Errorf("lastCheckpointStep %d, want 69 from checkpoint.approved", p.LastCheckpointStep)
-	}
-	if !p.UpdatedAt.Equal(t0.Add(55 * time.Second)) {
-		t.Errorf("updatedAt %v", p.UpdatedAt)
-	}
-	if v := view(t, s, "0cb3b0c3"); v.Status != "" {
-		t.Errorf("progress alone set status %s", v.Status)
+	if !v.UpdatedAt.Equal(t0.Add(3 * time.Minute)) {
+		t.Errorf("updatedAt = %v, want the newest time in the row", v.UpdatedAt)
 	}
 }
 
-func TestDuplicateEventIDsAreIgnored(t *testing.T) {
-	tl := &timeline{}
-	s := New(tl)
-	e := ev("job-0cb3b0c3-g0001-started", "job.started", 1, 0, nil)
-	if !s.Apply(context.Background(), e) || s.Apply(context.Background(), e) {
-		t.Fatal("first apply should count, the replay should not")
-	}
-	if len(tl.events) != 1 {
-		t.Errorf("timeline got %d entries", len(tl.events))
+func TestFromStatusShowsAnApprovedCheckpointBeforeAnyProgress(t *testing.T) {
+	v := FromStatus(model.StatusRow{JobID: "x", Generation: 2, State: "PENDING", SubmittedAt: &t0,
+		LastApprovedStep: ptr(int64(694)), LastApprovedAt: ptr(t0.Add(time.Minute))})
+	if v.Progress == nil || v.Progress.LastCheckpointStep != 694 || v.Progress.Step != 0 {
+		t.Errorf("progress = %+v, want only the last approved checkpoint (where recovery resumes)", v.Progress)
 	}
 }
 
-func TestTimelineEntries(t *testing.T) {
-	tl := &timeline{}
-	s := New(tl)
-	s.Apply(context.Background(), ev("submitted-0cb3b0c3-g0001", "job.submitted", 1, 0, nil))
-	s.Apply(context.Background(), ev("job-0cb3b0c3-g0001-placed", "job.placed", 1, 7*time.Second, nil))
-	s.Apply(context.Background(), ev("p1", "job.progress", 1, 30*time.Second, map[string]any{"step": 1.0}))
-	s.Apply(context.Background(), ev("ck", "checkpoint.approved", 1, time.Minute, map[string]any{"step": 69.0}))
-	s.Apply(context.Background(), ev("job-0cb3b0c3-g0001-end", "job.failed", 1, 2*time.Minute, map[string]any{"message": "oom"}))
-
-	if len(tl.events) != 4 {
-		t.Fatalf("got %d timeline entries, want 4 (job.progress stays out)", len(tl.events))
-	}
-	sub := tl.events[0]
-	// same key as the backend's own submitted record, so the two merge into one entry
-	if sub.Key != "2026-11-13T00:14:03.855Z#onprem#submitted" || sub.Cluster != model.ManagerCluster {
-		t.Errorf("submitted entry %+v", sub)
-	}
-	placed := tl.events[1]
-	if placed.Reason != "Placed" || placed.Cluster != "eks-a" || placed.Source != "job-watcher" ||
-		placed.Object != "JobSet/job-0cb3b0c3-g0001" || placed.Type != "Normal" {
-		t.Errorf("placed entry %+v", placed)
-	}
-	if ck := tl.events[2]; ck.Reason != "CheckpointApproved" || ck.Message != "checkpoint step 69 approved" {
-		t.Errorf("checkpoint entry %+v", ck)
-	}
-	if f := tl.events[3]; f.Reason != "Failed" || f.Type != "Warning" || f.Message != "oom" {
-		t.Errorf("failed entry %+v", f)
+func TestFromStatusHasNoProgressWithoutProgressOrCheckpoint(t *testing.T) {
+	if v := FromStatus(model.StatusRow{JobID: "x", Generation: 1, State: "PENDING", SubmittedAt: &t0}); v.Progress != nil {
+		t.Errorf("progress = %+v, want nil until train.py reports", v.Progress)
 	}
 }
 
-func TestUnknownJobHasNoView(t *testing.T) {
-	if _, ok := New(nil).Views([]string{"nope"})["nope"]; ok {
-		t.Error("view for a job never seen")
+// History turns job_runs and checkpoints into timeline rows, oldest first.
+func TestHistoryListsEachGenerationAndCheckpoint(t *testing.T) {
+	runs := []model.RunRecord{
+		{Generation: 1, Cluster: ptr("eks-a"), Queue: ptr("queue-light"), SubmittedAt: &t0,
+			StartedAt: ptr(t0.Add(time.Minute)), EndedAt: ptr(t0.Add(10 * time.Minute)), EndReason: ptr("fenced")},
+		{Generation: 2, Cluster: ptr("eks-b"), StartedAt: ptr(t0.Add(12 * time.Minute)),
+			EndedAt: ptr(t0.Add(30 * time.Minute)), EndReason: ptr("completed")},
+	}
+	ckpts := []model.CheckpointRecord{{Generation: 1, Step: 694, ApprovedAt: t0.Add(5 * time.Minute)}}
+
+	got := History("0cb3b0c3", runs, ckpts)
+	want := []struct {
+		reason, cluster, typ, object string
+	}{
+		{"Submitted", "onprem", "Normal", "JobSet/job-0cb3b0c3-g0001"},
+		{"Started", "eks-a", "Normal", "JobSet/job-0cb3b0c3-g0001"},
+		{"CheckpointApproved", "eks-a", "Normal", "JobSet/job-0cb3b0c3-g0001"},
+		{"Fenced", "eks-a", "Warning", "JobSet/job-0cb3b0c3-g0001"},
+		{"Resumed", "eks-b", "Normal", "JobSet/job-0cb3b0c3-g0002"},
+		{"Completed", "eks-b", "Normal", "JobSet/job-0cb3b0c3-g0002"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d entries %+v, want %d", len(got), got, len(want))
+	}
+	for i, w := range want {
+		g := got[i]
+		if g.Reason != w.reason || g.Cluster != w.cluster || g.Type != w.typ || g.Object != w.object || g.JobID != "0cb3b0c3" {
+			t.Errorf("[%d] = %s %s %s %s, want %+v", i, g.Reason, g.Cluster, g.Type, g.Object, w)
+		}
+	}
+	if got[2].Message != "checkpoint step 694 approved" {
+		t.Errorf("checkpoint message = %q", got[2].Message)
+	}
+}
+
+// The backend writes its own submission entry when it submits (service.report) with this key, so the
+// database row and that entry must collapse into one.
+func TestHistorySubmissionSharesTheBackendKey(t *testing.T) {
+	got := History("0cb3b0c3", []model.RunRecord{{Generation: 1, SubmittedAt: &t0}}, nil)
+	if len(got) != 1 || got[0].Key != "2026-11-13T00:14:03.855Z#onprem#submitted" {
+		t.Errorf("entries = %+v", got)
 	}
 }
 
