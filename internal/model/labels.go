@@ -19,6 +19,7 @@ const (
 	ModelAnnotation        = "devoops/model"
 	DatasetAnnotation      = "devoops/dataset" // "<id>/v<version>"
 	ConfigSHA256Annotation = "devoops/config-sha256"
+	ExpIDAnnotation        = "devoops/exp-id" // 실험 ID (잡 투입기, GPU-172). jobset.json을 따라 재배치 세대에도 남는다
 
 	// 서비스 DB가 없어서 작업 이름과 사용자가 바꾼 값도 JobSet에 남긴다.
 	NameAnnotation            = "devoops/name"

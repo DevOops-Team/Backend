@@ -65,6 +65,7 @@ type Input struct {
 	ConfigSHA256          string
 	CheckpointFormat      string
 	Hyperparameters       map[string]any
+	ExpID                 string // experiment the job belongs to; "" outside an experiment (GPU-172)
 	Queue                 string
 	Namespace             string
 	Region                string
@@ -101,23 +102,27 @@ func Render(in Input) (*unstructured.Unstructured, error) {
 	if pc := in.Settings.PriorityClasses.Training; pc != "" {
 		labels[model.PriorityClassLabel] = pc
 	}
+	annotations := map[string]any{
+		model.StrategyAnnotation:        in.Strategy,
+		model.WorldSizeAnnotation:       strconv.Itoa(in.GPUs),
+		model.ModelAnnotation:           in.Model,
+		model.DatasetAnnotation:         fmt.Sprintf("%s/v%d", in.DatasetID, in.DatasetVersion),
+		model.ConfigSHA256Annotation:    in.ConfigSHA256,
+		model.NameAnnotation:            in.Name,
+		model.HyperparametersAnnotation: string(hyperJSON),
+	}
+	if in.ExpID != "" {
+		annotations[model.ExpIDAnnotation] = in.ExpID
+	}
 
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": model.JobSetAPIVersion,
 		"kind":       model.JobSetKind,
 		"metadata": map[string]any{
-			"name":      name,
-			"namespace": in.Namespace,
-			"labels":    labels,
-			"annotations": map[string]any{
-				model.StrategyAnnotation:        in.Strategy,
-				model.WorldSizeAnnotation:       strconv.Itoa(in.GPUs),
-				model.ModelAnnotation:           in.Model,
-				model.DatasetAnnotation:         fmt.Sprintf("%s/v%d", in.DatasetID, in.DatasetVersion),
-				model.ConfigSHA256Annotation:    in.ConfigSHA256,
-				model.NameAnnotation:            in.Name,
-				model.HyperparametersAnnotation: string(hyperJSON),
-			},
+			"name":        name,
+			"namespace":   in.Namespace,
+			"labels":      labels,
+			"annotations": annotations,
 		},
 		"spec": map[string]any{
 			"failurePolicy": map[string]any{"maxRestarts": int64(0)}, // 재시작은 복구 컨트롤러만
