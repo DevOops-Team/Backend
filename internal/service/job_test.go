@@ -22,6 +22,7 @@ type fakeRecords struct {
 	rows  []model.StatusRow
 	runs  []model.RunRecord
 	ckpts []model.CheckpointRecord
+	final *model.FinalCheckpoint
 	err   error
 }
 
@@ -30,6 +31,9 @@ func (f fakeRecords) Statuses(context.Context, []string) ([]model.StatusRow, err
 }
 func (f fakeRecords) History(context.Context, string) ([]model.RunRecord, []model.CheckpointRecord, error) {
 	return f.runs, f.ckpts, f.err
+}
+func (f fakeRecords) FinalCheckpoint(context.Context, string) (*model.FinalCheckpoint, error) {
+	return f.final, f.err
 }
 
 type fakeEvents struct{ events []model.JobEvent }
