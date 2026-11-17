@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"mime"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
@@ -21,13 +23,14 @@ type s3Reader interface {
 
 // Objects stores job inputs in S3. The uploader streams large datasets as multipart uploads.
 type Objects struct {
-	uploader *manager.Uploader
-	client   s3Reader
-	bucket   string
+	uploader  *manager.Uploader
+	client    s3Reader
+	presigner *s3.PresignClient
+	bucket    string
 }
 
 func NewObjects(client *s3.Client, bucket string) *Objects {
-	return &Objects{uploader: manager.NewUploader(client), client: client, bucket: bucket}
+	return &Objects{uploader: manager.NewUploader(client), client: client, presigner: s3.NewPresignClient(client), bucket: bucket}
 }
 
 func (o *Objects) Put(ctx context.Context, key string, body io.Reader) error {
@@ -74,4 +77,20 @@ func (o *Objects) Get(ctx context.Context, key string, limit int64) ([]byte, int
 		return nil, 0, err
 	}
 	return data, aws.ToInt64(res.ContentLength), nil
+}
+
+// Presign signs a GET for key that the browser downloads straight from S3, saved as filename. The URL also
+// stops working when the backend's Roles Anywhere session (at most 1 hour) expires, so callers sign at
+// request time with a short ttl. S3 checks the signature when the download starts, not while it runs.
+func (o *Objects) Presign(ctx context.Context, key, filename string, ttl time.Duration) (string, error) {
+	req, err := o.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket:                     aws.String(o.bucket),
+		Key:                        aws.String(key),
+		ResponseContentDisposition: aws.String(mime.FormatMediaType("attachment", map[string]string{"filename": filename})),
+		ResponseContentType:        aws.String("application/octet-stream"),
+	}, s3.WithPresignExpires(ttl))
+	if err != nil {
+		return "", err
+	}
+	return req.URL, nil
 }

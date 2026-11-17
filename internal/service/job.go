@@ -35,6 +35,9 @@ type ObjectStore interface {
 	List(ctx context.Context, prefix string) ([]model.ObjectInfo, error)
 	// Get returns at most limit bytes of the object and its full size, or model.ErrNotFound.
 	Get(ctx context.Context, key string, limit int64) ([]byte, int64, error)
+	// Presign returns a GET URL valid for ttl that saves the object as filename (model downloads). It does
+	// not check that the object exists.
+	Presign(ctx context.Context, key, filename string, ttl time.Duration) (string, error)
 }
 
 // Scheduler submits JobSets to the management cluster and reads their queue state (Kueue).
@@ -50,6 +53,8 @@ type Scheduler interface {
 type JobRecords interface {
 	Statuses(ctx context.Context, ids []string) ([]model.StatusRow, error)
 	History(ctx context.Context, jobID string) ([]model.RunRecord, []model.CheckpointRecord, error)
+	// FinalCheckpoint returns the newest approved checkpoint, or nil when the job has none.
+	FinalCheckpoint(ctx context.Context, jobID string) (*model.FinalCheckpoint, error)
 }
 
 // Fencing creates the job's first fencing item (DynamoDB); model.ErrAlreadyExists if it exists.

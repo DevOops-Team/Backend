@@ -23,6 +23,8 @@ tags:
     description: 작업 제출 · 조회
   - name: files
     description: 작업이 저장한 파일 보기
+  - name: model
+    description: 학습이 끝난 작업의 최종 모델 (마지막 승인 체크포인트, ADR-30) 내려받기. 파일은 S3 presigned URL로 직접 받는다
   - name: health
     description: 상태 확인
 
@@ -191,6 +193,53 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "502": { $ref: "#/components/responses/BadGateway" }
 
+  /api/jobs/{id}/model:
+    get:
+      tags: [model]
+      summary: 학습 완료 모델 정보
+      operationId: getTrainedModel
+      description: |
+        학습이 끝난(SUCCEEDED) 작업의 마지막 승인 체크포인트(data.checkpoints)와 그 manifest.json의 파일 목록.
+        파일은 S3 `jobs/<id>/gen-NNNN/step-NNNNNNNN/` 아래에 있다.
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "200":
+          description: 최종 모델
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TrainedModel" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/NotFinished" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/jobs/{id}/model/files/{name}:
+    get:
+      tags: [model]
+      summary: 학습 완료 모델 파일 하나 (S3 presigned URL로 이동)
+      operationId: downloadTrainedModelFile
+      description: |
+        누를 때마다 15분짜리 presigned GET URL을 만들어 302로 보낸다. 브라우저는 S3에서 직접 받고,
+        파일 이름은 URL의 response-content-disposition으로 정해진다. S3는 받기 시작할 때만 서명을 확인한다.
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+        - name: name
+          in: path
+          required: true
+          description: manifest.json에 있는 파일명만 된다
+          schema: { type: string, example: __0_0.distcp }
+      responses:
+        "302":
+          description: S3 presigned URL로 이동
+          headers:
+            Location:
+              schema: { type: string, format: uri }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/NotFinished" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
 components:
   parameters:
     JobID:
@@ -229,6 +278,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    NotFinished:
+      description: 학습이 아직 끝나지 않음 (code NOT_FINISHED)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     BadGateway:
       description: S3 · 관리 클러스터 · DynamoDB 오류
       content:
@@ -243,7 +297,7 @@ components:
         error: { type: string }
         code:
           type: string
-          enum: [VALIDATION, NOT_FOUND, ALREADY_EXISTS, TOO_LARGE, SUBMIT_FAILED, UPSTREAM, INTERNAL]
+          enum: [VALIDATION, NOT_FOUND, ALREADY_EXISTS, NOT_FINISHED, TOO_LARGE, SUBMIT_FAILED, UPSTREAM, INTERNAL]
         fields:
           type: array
           items:
@@ -478,3 +532,24 @@ components:
         kind: { type: string, enum: [code, data], description: "code = config.json · jobset.json, data = 업로드한 파일의 manifest.json" }
         name: { type: string }
         size: { type: integer, format: int64 }
+
+    TrainedModel:
+      type: object
+      required: [jobId, generation, step, format, worldSize, sizeBytes, approvedAt, files]
+      properties:
+        jobId: { type: string }
+        generation: { type: integer, description: 마지막 체크포인트를 저장한 세대 }
+        step: { type: integer, format: int64 }
+        format: { type: string, example: fsdp-dcp, description: "학습 방식의 checkpoint_format (fsdp-dcp · ddp-pt)" }
+        worldSize: { type: integer, description: 저장한 GPU 수 }
+        sizeBytes: { type: integer, format: int64 }
+        approvedAt: { type: string, format: date-time }
+        files:
+          type: array
+          items:
+            type: object
+            required: [name, size, sha256]
+            properties:
+              name: { type: string }
+              size: { type: integer, format: int64 }
+              sha256: { type: string }

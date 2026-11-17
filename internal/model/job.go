@@ -144,6 +144,37 @@ type CheckpointRecord struct {
 	ApprovedAt time.Time
 }
 
+// FinalCheckpoint is the job's latest approved checkpoint (data.checkpoints, newest generation and step).
+// When the job has finished it is the trained model: only the final checkpoint is kept (ADR-30).
+type FinalCheckpoint struct {
+	Generation  int
+	Step        int64
+	Format      string
+	WorldSize   int
+	ManifestKey string // jobs/<id>/gen-NNNN/step-NNNNNNNN/manifest.json (Data checkpoint/ckpt/layout.py)
+	SizeBytes   int64
+	ApprovedAt  time.Time
+}
+
+// ModelFile is one file of the trained model, as the checkpoint manifest lists it.
+type ModelFile struct {
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+// TrainedModel is what GET /api/jobs/{id}/model returns: the final checkpoint of a finished job.
+type TrainedModel struct {
+	JobID      string      `json:"jobId"`
+	Generation int         `json:"generation"`
+	Step       int64       `json:"step"`
+	Format     string      `json:"format"`    // the strategy's checkpoint_format (settings), e.g. fsdp-dcp
+	WorldSize  int         `json:"worldSize"` // GPUs that saved it
+	SizeBytes  int64       `json:"sizeBytes"`
+	ApprovedAt time.Time   `json:"approvedAt"`
+	Files      []ModelFile `json:"files"`
+}
+
 // JobView is what the data database says about a job's latest generation (service/jobview).
 type JobView struct {
 	Generation int
