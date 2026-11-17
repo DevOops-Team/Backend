@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/DevOops-Team/Backend/internal/model"
+	"github.com/DevOops-Team/Backend/internal/settings"
 )
 
 var t0 = time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC)
@@ -45,6 +46,22 @@ func service(sched Scheduler, rec JobRecords, ev EventReader) *JobService {
 }
 
 func step(v int64) *int64 { return &v }
+
+func TestDefaultGPUOptionsCanBeSubmittedForBothStrategies(t *testing.T) {
+	cfg, err := settings.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewJobService(Config{Settings: cfg}, Deps{})
+	options := s.Options()
+	for _, strategy := range options.Strategies {
+		for _, count := range []int{1, 2, 4} {
+			if _, _, err := s.validate(model.SubmitSpec{Strategy: strategy.Name, GPUs: count}); err != nil {
+				t.Errorf("validate strategy %s with %d GPUs: %v", strategy.Name, count, err)
+			}
+		}
+	}
+}
 
 func TestListShowsTheDatabaseStatusAndProgress(t *testing.T) {
 	sched := fakeScheduler{[]model.JobStatus{{ID: "0cb3b0c3", Generation: 1, Status: model.StatusAdmitted, CreatedAt: t0}}}
