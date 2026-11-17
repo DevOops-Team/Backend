@@ -95,6 +95,15 @@ func (h *jobHandler) get(c *gin.Context) {
 	c.JSON(http.StatusOK, job)
 }
 
+// remove deletes a finished job with its checkpoints, final model and uploaded inputs (GPU-196).
+func (h *jobHandler) remove(c *gin.Context) {
+	if err := h.jobs.Delete(c.Request.Context(), c.Param("id")); err != nil {
+		fail(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 func (h *jobHandler) events(c *gin.Context) {
 	events, err := h.jobs.Events(c.Request.Context(), c.Param("id"))
 	if err != nil {

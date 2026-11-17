@@ -18,6 +18,7 @@ type fakeScheduler struct{ statuses []model.JobStatus }
 
 func (f fakeScheduler) Submit(context.Context, *unstructured.Unstructured) error { return nil }
 func (f fakeScheduler) List(context.Context) ([]model.JobStatus, error)          { return f.statuses, nil }
+func (f fakeScheduler) Delete(context.Context, string) error                     { return nil }
 
 type fakeRecords struct {
 	rows  []model.StatusRow

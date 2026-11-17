@@ -133,6 +133,23 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "502": { $ref: "#/components/responses/BadGateway" }
 
+    delete:
+      tags: [jobs]
+      summary: 끝난 작업 삭제 (체크포인트 · 최종 모델 · 업로드 파일 영구 삭제)
+      operationId: deleteJob
+      description: |
+        성공 · 실패 · 취소된 작업만 지운다. S3 `jobs/<id>/`(체크포인트 · 최종 모델), `code/<id>/`, `datasets/<id>/` 아래를
+        **모든 버전과 삭제 표시까지** 지운 뒤(버킷 버전 관리 켜짐, 되돌릴 수 없음) 모든 세대의 JobSet을 지워 목록에서 뺀다.
+        S3 단계가 실패하면 JobSet은 남으므로 다시 요청하면 된다. 데이터 DB 기록(지표 이력)은 남긴다.
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "204": { description: 삭제함 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/NotFinished" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
   /api/jobs/{id}/events:
     get:
       tags: [jobs]

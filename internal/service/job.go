@@ -38,6 +38,9 @@ type ObjectStore interface {
 	// Presign returns a GET URL valid for ttl that saves the object as filename (model downloads). It does
 	// not check that the object exists.
 	Presign(ctx context.Context, key, filename string, ttl time.Duration) (string, error)
+	// DeleteAll permanently removes every object under prefix, including old versions and delete markers
+	// (the bucket is versioned). Nothing under the prefix is not an error.
+	DeleteAll(ctx context.Context, prefix string) error
 }
 
 // Scheduler submits JobSets to the management cluster and reads their queue state (Kueue).
@@ -45,6 +48,8 @@ type Scheduler interface {
 	// Submit returns model.ErrAlreadyExists when the JobSet name is taken.
 	Submit(ctx context.Context, js *unstructured.Unstructured) error
 	List(ctx context.Context) ([]model.JobStatus, error)
+	// Delete removes every generation's JobSet of the job. No JobSet left is not an error.
+	Delete(ctx context.Context, jobID string) error
 }
 
 // JobRecords reads what the data database recorded about jobs (Kafka job.lifecycle → collector →
