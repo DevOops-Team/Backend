@@ -2,9 +2,11 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/DevOops-Team/Backend/internal/model"
@@ -119,4 +121,28 @@ func (r *JobRecords) History(ctx context.Context, jobID string) ([]model.RunReco
 		ckpts = append(ckpts, c)
 	}
 	return runs, ckpts, rows.Err()
+}
+
+// FinalCheckpoint returns the job's newest approved checkpoint (highest generation, then step), or nil when
+// it has none. Only approved checkpoints reach data.checkpoints (checkpoint.approved).
+func (r *JobRecords) FinalCheckpoint(ctx context.Context, jobID string) (*model.FinalCheckpoint, error) {
+	if r.pool == nil {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+	var c model.FinalCheckpoint
+	var worldSize int16
+	err := r.pool.QueryRow(ctx, `
+		SELECT generation, step, format, world_size, manifest_key, size_bytes, approved_at
+		FROM data.checkpoints WHERE job_id = $1 ORDER BY generation DESC, step DESC LIMIT 1`, jobID).
+		Scan(&c.Generation, &c.Step, &c.Format, &worldSize, &c.ManifestKey, &c.SizeBytes, &c.ApprovedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query checkpoints: %w", err)
+	}
+	c.WorldSize = int(worldSize)
+	return &c, nil
 }

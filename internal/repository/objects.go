@@ -75,3 +75,16 @@ func (o *Objects) Get(ctx context.Context, key string, limit int64) ([]byte, int
 	}
 	return data, aws.ToInt64(res.ContentLength), nil
 }
+
+// Open streams a whole object, for downloads; the caller closes the body.
+func (o *Objects) Open(ctx context.Context, key string) (io.ReadCloser, int64, error) {
+	res, err := o.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(o.bucket), Key: aws.String(key)})
+	var missing *types.NoSuchKey
+	if errors.As(err, &missing) {
+		return nil, 0, model.ErrNotFound
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	return res.Body, aws.ToInt64(res.ContentLength), nil
+}

@@ -23,6 +23,10 @@ func TestJobRecordsWithoutADatabaseReportNothing(t *testing.T) {
 	if err != nil || runs != nil || ckpts != nil {
 		t.Errorf("History = %v, %v, %v; want nothing without PGHOST", runs, ckpts, err)
 	}
+	final, err := r.FinalCheckpoint(t.Context(), "x")
+	if err != nil || final != nil {
+		t.Errorf("FinalCheckpoint = %v, %v; want nothing without PGHOST", final, err)
+	}
 }
 
 // TestJobRecordsReadTheDataSchema runs against a PostgreSQL that has the Data repo db/ schema applied
@@ -58,7 +62,8 @@ func TestJobRecordsReadTheDataSchema(t *testing.T) {
 		       ('rt000001', 2, 'job-rt000001-g0002', 'eks-b', 'queue-recovery', 2, 'fsdp', NULL, $4, NULL, NULL)`,
 		t0, t0.Add(time.Minute), t0.Add(10*time.Minute), t0.Add(12*time.Minute))
 	mustExec(`INSERT INTO data.checkpoints (job_id, generation, step, format, world_size, manifest_key, file_count, size_bytes, config_sha256, saved_at, approved_at)
-		VALUES ('rt000001', 1, 694, 'fsdp-sharded', 2, 'k', 2, 10, 'c', $1, $1)`, t0.Add(5*time.Minute))
+		VALUES ('rt000001', 1, 300, 'fsdp-sharded', 2, 'k300', 2, 9, 'c', $1, $1),
+		       ('rt000001', 1, 694, 'fsdp-sharded', 2, 'k', 2, 10, 'c', $2, $2)`, t0.Add(3*time.Minute), t0.Add(5*time.Minute))
 	mustExec(`INSERT INTO data.job_progress (job_id, generation, status, step, total_steps, loss, event_id, updated_at)
 		VALUES ('rt000001', 2, 'RUNNING', 800, 2080, 1.5, 'e', $1)`, t0.Add(13*time.Minute))
 
@@ -88,7 +93,19 @@ func TestJobRecordsReadTheDataSchema(t *testing.T) {
 	if len(runs) != 2 || runs[0].Generation != 1 || *runs[0].EndReason != "fenced" || runs[1].SubmittedAt != nil {
 		t.Errorf("runs = %+v", runs)
 	}
-	if len(ckpts) != 1 || ckpts[0].Step != 694 {
+	if len(ckpts) != 2 || ckpts[0].Step != 300 || ckpts[1].Step != 694 {
 		t.Errorf("checkpoints = %+v", ckpts)
+	}
+
+	final, err := r.FinalCheckpoint(ctx, "rt000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final == nil || final.Generation != 1 || final.Step != 694 || final.WorldSize != 2 || final.ManifestKey != "k" ||
+		final.SizeBytes != 10 {
+		t.Errorf("final checkpoint = %+v, want generation 1 step 694", final)
+	}
+	if none, err := r.FinalCheckpoint(ctx, "nope"); err != nil || none != nil {
+		t.Errorf("FinalCheckpoint(nope) = %+v, %v; want nil", none, err)
 	}
 }

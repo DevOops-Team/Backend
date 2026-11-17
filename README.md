@@ -24,8 +24,9 @@ Frontend ◀── 폴링 ── Backend ◀── 데이터 DB v_job_status (ba
 | `GET /api/jobs` · `/api/jobs/{id}` | 관리 클러스터 JobSet + 데이터 DB `v_job_status`의 상태 · 진행률 · 마지막 승인 체크포인트 |
 | `GET /api/jobs/{id}/events` | 타임라인: 데이터 DB `job_runs` · `checkpoints`(세대별 제출 · 시작 · 종료, 승인 체크포인트) + 관리 클러스터 Event (메모리) |
 | `GET /api/jobs/{id}/files` · `/files/{kind}/{name}` | `code/<id>/`의 train.py · config.json · jobset.json, 업로드 manifest.json 앞부분 |
+| `GET /api/jobs/{id}/model` · `/model/archive` · `/model/files/{name}` | 학습 완료(SUCCEEDED) 모델 = 데이터 DB `checkpoints`의 마지막 승인본(ADR-30). 정보 · 전체 zip(압축 없음, manifest.json 포함) · 파일 하나를 S3 `jobs/<id>/gen-N/step-N/`에서 스트리밍. 파일은 manifest에 있는 이름만 |
 
-오류는 `{"error","code","fields"}`: 400 입력 · 409 중복 · 413 업로드 상한 초과 · 502 S3 · 관리 클러스터 · DynamoDB(펜싱).
+오류는 `{"error","code","fields"}`: 400 입력 · 409 중복(모델은 `NOT_FINISHED` = 학습 안 끝남) · 413 업로드 상한 초과 · 502 S3 · 관리 클러스터 · DynamoDB(펜싱).
 
 ## 체크포인트 간격
 
