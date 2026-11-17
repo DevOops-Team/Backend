@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"time"
@@ -15,10 +16,12 @@ import (
 	"github.com/DevOops-Team/Backend/internal/model"
 )
 
-// s3Reader is the subset of *s3.Client used for reading back job inputs.
+// s3Reader is the subset of *s3.Client used for reading back job inputs and deleting a job's objects.
 type s3Reader interface {
 	s3.ListObjectsV2APIClient
+	s3.ListObjectVersionsAPIClient
 	GetObject(ctx context.Context, in *s3.GetObjectInput, opts ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+	DeleteObjects(ctx context.Context, in *s3.DeleteObjectsInput, opts ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error)
 }
 
 // Objects stores job inputs in S3. The uploader streams large datasets as multipart uploads.
@@ -93,4 +96,45 @@ func (o *Objects) Presign(ctx context.Context, key, filename string, ttl time.Du
 		return "", err
 	}
 	return req.URL, nil
+}
+
+// deleteBatch is the most keys one DeleteObjects call takes.
+const deleteBatch = 1000
+
+// DeleteAll removes every version and delete marker under prefix, so the data is gone for good even though
+// the bucket is versioned. Each page of the version listing (at most 1000) is one DeleteObjects call.
+func (o *Objects) DeleteAll(ctx context.Context, prefix string) error {
+	pages := s3.NewListObjectVersionsPaginator(o.client, &s3.ListObjectVersionsInput{
+		Bucket:  aws.String(o.bucket),
+		Prefix:  aws.String(prefix),
+		MaxKeys: aws.Int32(deleteBatch),
+	})
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("list versions: %w", err)
+		}
+		ids := make([]types.ObjectIdentifier, 0, len(page.Versions)+len(page.DeleteMarkers))
+		for _, v := range page.Versions {
+			ids = append(ids, types.ObjectIdentifier{Key: v.Key, VersionId: v.VersionId})
+		}
+		for _, m := range page.DeleteMarkers {
+			ids = append(ids, types.ObjectIdentifier{Key: m.Key, VersionId: m.VersionId})
+		}
+		for start := 0; start < len(ids); start += deleteBatch {
+			batch := ids[start:min(start+deleteBatch, len(ids))]
+			res, err := o.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+				Bucket: aws.String(o.bucket),
+				Delete: &types.Delete{Objects: batch, Quiet: aws.Bool(true)},
+			})
+			if err != nil {
+				return fmt.Errorf("delete objects: %w", err)
+			}
+			if len(res.Errors) > 0 {
+				e := res.Errors[0]
+				return fmt.Errorf("delete %s (%d failed): %s %s", aws.ToString(e.Key), len(res.Errors), aws.ToString(e.Code), aws.ToString(e.Message))
+			}
+		}
+	}
+	return nil
 }

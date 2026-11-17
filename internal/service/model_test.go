@@ -25,6 +25,8 @@ func (f fakeObjects) Get(_ context.Context, key string, limit int64) ([]byte, in
 	return []byte(v[:min(int64(len(v)), limit)]), int64(len(v)), nil
 }
 
+func (f fakeObjects) DeleteAll(context.Context, string) error { return nil }
+
 // Presign returns a fake URL that records what was signed.
 func (f fakeObjects) Presign(_ context.Context, key, filename string, ttl time.Duration) (string, error) {
 	return "https://s3.example/" + key + "?filename=" + filename + "&ttl=" + ttl.String(), nil
