@@ -24,7 +24,7 @@ tags:
   - name: files
     description: 작업이 저장한 파일 보기
   - name: model
-    description: 학습이 끝난 작업의 최종 모델 (마지막 승인 체크포인트, ADR-30) 내려받기
+    description: 학습이 끝난 작업의 최종 모델 (마지막 승인 체크포인트, ADR-30) 내려받기. 파일은 S3 presigned URL로 직접 받는다
   - name: health
     description: 상태 확인
 
@@ -214,35 +214,14 @@ paths:
         "409": { $ref: "#/components/responses/NotFinished" }
         "502": { $ref: "#/components/responses/BadGateway" }
 
-  /api/jobs/{id}/model/archive:
-    get:
-      tags: [model]
-      summary: 학습 완료 모델 전체 (zip)
-      operationId: downloadTrainedModel
-      description: |
-        모든 파일과 manifest.json(파일별 sha256)을 `<이름>-step-<N>/` 폴더 하나에 담은 zip(압축 없음)을 스트리밍한다.
-        보내는 중에 S3 오류가 나면 연결을 끊는다(끝까지 받지 못한 zip은 완전한 파일로 보이지 않는다).
-      parameters:
-        - $ref: "#/components/parameters/JobID"
-      responses:
-        "200":
-          description: zip
-          headers:
-            Content-Disposition:
-              schema: { type: string, example: "attachment; filename=qwen-0cb3b0c3-step-694.zip" }
-          content:
-            application/zip:
-              schema: { type: string, format: binary }
-        "400": { $ref: "#/components/responses/BadRequest" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/NotFinished" }
-        "502": { $ref: "#/components/responses/BadGateway" }
-
   /api/jobs/{id}/model/files/{name}:
     get:
       tags: [model]
-      summary: 학습 완료 모델 파일 하나
+      summary: 학습 완료 모델 파일 하나 (S3 presigned URL로 이동)
       operationId: downloadTrainedModelFile
+      description: |
+        누를 때마다 15분짜리 presigned GET URL을 만들어 302로 보낸다. 브라우저는 S3에서 직접 받고,
+        파일 이름은 URL의 response-content-disposition으로 정해진다. S3는 받기 시작할 때만 서명을 확인한다.
       parameters:
         - $ref: "#/components/parameters/JobID"
         - name: name
@@ -251,14 +230,11 @@ paths:
           description: manifest.json에 있는 파일명만 된다
           schema: { type: string, example: __0_0.distcp }
       responses:
-        "200":
-          description: 파일 내용
+        "302":
+          description: S3 presigned URL로 이동
           headers:
-            Content-Disposition:
-              schema: { type: string, example: "attachment; filename=__0_0.distcp" }
-          content:
-            application/octet-stream:
-              schema: { type: string, format: binary }
+            Location:
+              schema: { type: string, format: uri }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/NotFinished" }

@@ -1,14 +1,13 @@
 package service
 
 import (
-	"archive/zip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/DevOops-Team/Backend/internal/model"
 )
@@ -16,7 +15,8 @@ import (
 // The trained model is the final approved checkpoint of a finished job (ADR-30). The ckpt-sidecar uploads
 // it to jobs/<id>/gen-NNNN/step-NNNNNNNN/ and writes manifest.json last (Data checkpoint/ckpt/storage.py);
 // the collector records its manifest_key in data.checkpoints. The manifest is the list of files a
-// download may read, so a request can never reach another key.
+// download may sign, so a request can never reach another key. Downloads are presigned S3 URLs: the
+// browser fetches the files from S3 directly (GPU-190).
 
 // checkpointManifest is the part of the sidecar's manifest.json the backend reads.
 type checkpointManifest struct {
@@ -27,19 +27,14 @@ type checkpointManifest struct {
 	} `json:"files"`
 }
 
-// ModelArchive is the whole trained model as one zip. Write streams it; the files are stored, not
-// compressed, because weights do not compress.
-type ModelArchive struct {
-	Name  string // file name for Content-Disposition
-	Write func(w io.Writer) error
-}
+// ModelURLTTL is how long a signed download link works. It is signed when the user clicks, so it only has
+// to outlive the start of the download.
+const ModelURLTTL = 15 * time.Minute
 
 // trainedModel is a finished job's final checkpoint with the S3 prefix of its files.
 type trainedModel struct {
 	model.TrainedModel
-	jobName  string
-	prefix   string
-	manifest []byte
+	prefix string
 }
 
 // Model returns the final checkpoint of a finished job: 409 while it has not succeeded, 404 when no
@@ -49,76 +44,23 @@ func (s *JobService) Model(ctx context.Context, id string) (model.TrainedModel, 
 	return m.TrainedModel, err
 }
 
-// ModelFile opens one file of the trained model; only names in its manifest are allowed.
-func (s *JobService) ModelFile(ctx context.Context, id, name string) (model.ObjectStream, error) {
+// ModelFileURL signs a download of one file of the trained model; only names in its manifest are allowed.
+func (s *JobService) ModelFileURL(ctx context.Context, id, name string) (string, error) {
 	if !safeName(name) {
-		return model.ObjectStream{}, invalid("invalid file name")
+		return "", invalid("invalid file name")
 	}
 	m, err := s.trainedModel(ctx, id)
 	if err != nil {
-		return model.ObjectStream{}, err
+		return "", err
 	}
 	if !slices.ContainsFunc(m.Files, func(f model.ModelFile) bool { return f.Name == name }) {
-		return model.ObjectStream{}, notFound("file not in the trained model")
+		return "", notFound("file not in the trained model")
 	}
-	body, size, err := s.objects.Open(ctx, m.prefix+name)
-	if errors.Is(err, model.ErrNotFound) {
-		return model.ObjectStream{}, notFound("model file missing in storage")
-	}
+	url, err := s.objects.Presign(ctx, m.prefix+name, name, ModelURLTTL)
 	if err != nil {
-		return model.ObjectStream{}, upstream("open model file", err)
+		return "", upstream("sign model download", err)
 	}
-	return model.ObjectStream{Name: name, Body: body, Size: size}, nil
-}
-
-// ModelArchive checks the job before anything is written, then returns the zip writer. Entries sit in
-// one folder named after the job and step, with the manifest (sha256 per file) next to them.
-func (s *JobService) ModelArchive(ctx context.Context, id string) (ModelArchive, error) {
-	m, err := s.trainedModel(ctx, id)
-	if err != nil {
-		return ModelArchive{}, err
-	}
-	base := m.jobName
-	if !validName.MatchString(base) {
-		base = id
-	}
-	dir := fmt.Sprintf("%s-step-%d", base, m.Step)
-	write := func(w io.Writer) error {
-		zw := zip.NewWriter(w)
-		entry := func(name string) (io.Writer, error) {
-			return zw.CreateHeader(&zip.FileHeader{Name: dir + "/" + name, Method: zip.Store, Modified: m.ApprovedAt})
-		}
-		ew, err := entry(manifestName)
-		if err != nil {
-			return err
-		}
-		if _, err := ew.Write(m.manifest); err != nil {
-			return err
-		}
-		for _, f := range m.Files {
-			if err := s.copyObject(ctx, m.prefix+f.Name, entry, f.Name); err != nil {
-				return err
-			}
-		}
-		return zw.Close()
-	}
-	return ModelArchive{Name: dir + ".zip", Write: write}, nil
-}
-
-func (s *JobService) copyObject(ctx context.Context, key string, entry func(string) (io.Writer, error), name string) error {
-	body, _, err := s.objects.Open(ctx, key)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", key, err)
-	}
-	defer body.Close()
-	w, err := entry(name)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(w, body); err != nil {
-		return fmt.Errorf("copy %s: %w", key, err)
-	}
-	return nil
+	return url, nil
 }
 
 func (s *JobService) trainedModel(ctx context.Context, id string) (trainedModel, error) {
@@ -168,8 +110,6 @@ func (s *JobService) trainedModel(ctx context.Context, id string) (trainedModel,
 	return trainedModel{
 		TrainedModel: model.TrainedModel{JobID: id, Generation: final.Generation, Step: final.Step, Format: final.Format,
 			WorldSize: final.WorldSize, SizeBytes: final.SizeBytes, ApprovedAt: final.ApprovedAt, Files: files},
-		jobName:  jobs[i].Name,
-		prefix:   prefix,
-		manifest: data,
+		prefix: prefix,
 	}, nil
 }

@@ -5,7 +5,6 @@ package model
 
 import (
 	"encoding/json"
-	"io"
 	"time"
 )
 
@@ -174,13 +173,6 @@ type TrainedModel struct {
 	SizeBytes  int64       `json:"sizeBytes"`
 	ApprovedAt time.Time   `json:"approvedAt"`
 	Files      []ModelFile `json:"files"`
-}
-
-// ObjectStream is one stored object opened for reading; the caller closes Body.
-type ObjectStream struct {
-	Name string
-	Body io.ReadCloser
-	Size int64
 }
 
 // JobView is what the data database says about a job's latest generation (service/jobview).

@@ -22,8 +22,7 @@ type JobService interface {
 	Files(ctx context.Context, id string) ([]model.File, error)
 	File(ctx context.Context, id, kind, name string) (model.FileContent, error)
 	Model(ctx context.Context, id string) (model.TrainedModel, error)
-	ModelFile(ctx context.Context, id, name string) (model.ObjectStream, error)
-	ModelArchive(ctx context.Context, id string) (service.ModelArchive, error)
+	ModelFileURL(ctx context.Context, id, name string) (string, error)
 }
 
 // NewRouter wires middleware and routes. The API routes must match api/openapi.yaml
@@ -45,7 +44,6 @@ func NewRouter(jobs JobService, allowedOrigin string) *gin.Engine {
 	r.GET("/api/jobs/:id/files", h.files)
 	r.GET("/api/jobs/:id/files/:kind/:name", h.file)
 	r.GET("/api/jobs/:id/model", h.model)
-	r.GET("/api/jobs/:id/model/archive", h.modelArchive)
 	r.GET("/api/jobs/:id/model/files/:name", h.modelFile)
 
 	r.GET("/openapi.yaml", openAPISpec)
