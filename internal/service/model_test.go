@@ -1,13 +1,11 @@
 package service
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"errors"
 	"io"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/DevOops-Team/Backend/internal/model"
 )
@@ -26,12 +24,10 @@ func (f fakeObjects) Get(_ context.Context, key string, limit int64) ([]byte, in
 	}
 	return []byte(v[:min(int64(len(v)), limit)]), int64(len(v)), nil
 }
-func (f fakeObjects) Open(_ context.Context, key string) (io.ReadCloser, int64, error) {
-	v, ok := f[key]
-	if !ok {
-		return nil, 0, model.ErrNotFound
-	}
-	return io.NopCloser(strings.NewReader(v)), int64(len(v)), nil
+
+// Presign returns a fake URL that records what was signed.
+func (f fakeObjects) Presign(_ context.Context, key, filename string, ttl time.Duration) (string, error) {
+	return "https://s3.example/" + key + "?filename=" + filename + "&ttl=" + ttl.String(), nil
 }
 
 const (
@@ -116,61 +112,25 @@ func TestModelRejectsAManifestOutsideTheJob(t *testing.T) {
 	}
 }
 
-func TestModelFileStreamsOnlyFilesInTheManifest(t *testing.T) {
+func TestModelFileURLSignsOnlyFilesInTheManifest(t *testing.T) {
 	s := modelService(model.StatusSucceeded, finished(), bucket())
-	f, err := s.ModelFile(t.Context(), modelJob, "__0_0.distcp")
+	url, err := s.ModelFileURL(t.Context(), modelJob, "__0_0.distcp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Body.Close()
-	body, _ := io.ReadAll(f.Body)
-	if string(body) != "shard0" || f.Size != 6 || f.Name != "__0_0.distcp" {
-		t.Errorf("file = %q size %d name %q", body, f.Size, f.Name)
+	if want := "https://s3.example/" + modelPrefix + "__0_0.distcp?filename=__0_0.distcp&ttl=15m0s"; url != want {
+		t.Errorf("url = %q, want %q", url, want)
 	}
 	for _, name := range []string{"manifest.json", "../config.json", "missing.distcp"} {
-		if _, err := s.ModelFile(t.Context(), modelJob, name); kindOf(err) != KindNotFound && kindOf(err) != KindInvalid {
+		if _, err := s.ModelFileURL(t.Context(), modelJob, name); kindOf(err) != KindNotFound && kindOf(err) != KindInvalid {
 			t.Errorf("%s: err = %v, want not found or invalid", name, err)
 		}
 	}
 }
 
-func TestModelArchiveZipsEveryFileWithTheManifest(t *testing.T) {
-	a, err := modelService(model.StatusSucceeded, finished(), bucket()).ModelArchive(t.Context(), modelJob)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a.Name != "qwen-0cb3b0c3-step-694.zip" {
-		t.Errorf("name = %q", a.Name)
-	}
-	var buf bytes.Buffer
-	if err := a.Write(&buf); err != nil {
-		t.Fatal(err)
-	}
-	zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[string]string{}
-	for _, f := range zr.File {
-		rc, err := f.Open()
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, _ := io.ReadAll(rc)
-		rc.Close()
-		got[f.Name] = string(b)
-	}
-	want := map[string]string{
-		"qwen-0cb3b0c3-step-694/manifest.json": modelManif,
-		"qwen-0cb3b0c3-step-694/.metadata":     "meta",
-		"qwen-0cb3b0c3-step-694/__0_0.distcp":  "shard0",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("entries = %v", got)
-	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Errorf("%s = %q, want %q", k, got[k], v)
-		}
+func TestModelFileURLRefusesUnfinishedJobs(t *testing.T) {
+	_, err := modelService(model.StatusRunning, finished(), bucket()).ModelFileURL(t.Context(), modelJob, "__0_0.distcp")
+	if kindOf(err) != KindConflict {
+		t.Errorf("err = %v, want conflict", err)
 	}
 }

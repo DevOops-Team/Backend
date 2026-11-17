@@ -35,8 +35,9 @@ type ObjectStore interface {
 	List(ctx context.Context, prefix string) ([]model.ObjectInfo, error)
 	// Get returns at most limit bytes of the object and its full size, or model.ErrNotFound.
 	Get(ctx context.Context, key string, limit int64) ([]byte, int64, error)
-	// Open streams a whole object (model downloads), or model.ErrNotFound.
-	Open(ctx context.Context, key string) (io.ReadCloser, int64, error)
+	// Presign returns a GET URL valid for ttl that saves the object as filename (model downloads). It does
+	// not check that the object exists.
+	Presign(ctx context.Context, key, filename string, ttl time.Duration) (string, error)
 }
 
 // Scheduler submits JobSets to the management cluster and reads their queue state (Kueue).
