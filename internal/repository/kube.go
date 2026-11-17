@@ -89,6 +89,25 @@ func (c *Kube) List(ctx context.Context) ([]model.JobStatus, error) {
 	return out, nil
 }
 
+// Delete removes every generation's JobSet of the job. Background propagation lets the garbage collector
+// remove the Kueue Workload and the Jobs; MultiKueue then removes the copies on the worker cluster.
+// The backend's Role has delete but not deletecollection, so the JobSets are listed and deleted one by one.
+func (c *Kube) Delete(ctx context.Context, jobID string) error {
+	res := c.dyn.Resource(JobSetGVR).Namespace(c.namespace)
+	l, err := res.List(ctx, metav1.ListOptions{LabelSelector: model.JobIDLabel + "=" + jobID})
+	if err != nil {
+		return fmt.Errorf("list jobsets: %w", err)
+	}
+	background := metav1.DeletePropagationBackground
+	for _, js := range l.Items {
+		err := res.Delete(ctx, js.GetName(), metav1.DeleteOptions{PropagationPolicy: &background})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete jobset %s: %w", js.GetName(), err)
+		}
+	}
+	return nil
+}
+
 // Events lists core/v1 Events of the training namespace (timeline.Source).
 func (c *Kube) Events(ctx context.Context) ([]unstructured.Unstructured, error) {
 	l, err := c.dyn.Resource(EventGVR).Namespace(c.namespace).List(ctx, metav1.ListOptions{})

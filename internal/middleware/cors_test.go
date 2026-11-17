@@ -39,7 +39,7 @@ func TestCORSAnswersPreflightForFrontendOrigin(t *testing.T) {
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != frontend {
 		t.Errorf("allow-origin = %q", got)
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "POST") {
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, "POST") || !strings.Contains(got, "DELETE") {
 		t.Errorf("allow-methods = %q", got)
 	}
 }
