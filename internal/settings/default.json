@@ -17,13 +17,13 @@
     "run_as_user": 1000
   },
   "strategies": {
-    "fsdp": { "checkpoint_format": "fsdp-dcp", "min_gpus": 2 },
+    "fsdp": { "checkpoint_format": "fsdp-dcp", "min_gpus": 1 },
     "ddp": { "checkpoint_format": "ddp-pt", "min_gpus": 1 }
   },
   "training": {
     "dataset_format": "text-jsonl",
     "default_strategy": "fsdp",
-    "gpus": { "min": 1, "max": 2, "default": 2, "options": [1, 2, 4] },
+    "gpus": { "min": 1, "max": 4, "default": 2, "options": [1, 2, 4] },
     "defaults": {
       "epochs": 10,
       "max_steps": null,
