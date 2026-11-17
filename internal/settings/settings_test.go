@@ -7,14 +7,14 @@ import (
 	"testing"
 )
 
-func TestDefaultSettingsDescribeTheEKSATestCluster(t *testing.T) {
+func TestDefaultSettingsOfferOneTwoAndFourGPUs(t *testing.T) {
 	s, err := Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	tr := s.Training
-	if tr.DefaultStrategy != "fsdp" || tr.GPUs.Default != 2 || tr.GPUs.Max != 2 {
-		t.Errorf("training = %+v, want fsdp on the two GPU nodes eks-a has", tr)
+	if tr.DefaultStrategy != "fsdp" || tr.GPUs.Default != 2 || tr.GPUs.Max != 4 {
+		t.Errorf("training = %+v, want fsdp with default 2 and maximum 4 GPUs", tr)
 	}
 	if got := tr.GPUs.Options; len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 4 {
 		t.Errorf("gpu options = %v, want 1, 2, 4", got)
@@ -22,7 +22,7 @@ func TestDefaultSettingsDescribeTheEKSATestCluster(t *testing.T) {
 	if tr.DatasetFormat != "text-jsonl" {
 		t.Errorf("dataset format = %q", tr.DatasetFormat)
 	}
-	if s.Strategies["fsdp"].MinGPUs != 2 || s.Strategies["ddp"].MinGPUs != 1 {
+	if s.Strategies["fsdp"].MinGPUs != 1 || s.Strategies["ddp"].MinGPUs != 1 {
 		t.Errorf("min gpus = %+v", s.Strategies)
 	}
 	if s.Strategies["ddp"].CheckpointFormat != "ddp-pt" || s.Strategies["fsdp"].CheckpointFormat != "fsdp-dcp" {
