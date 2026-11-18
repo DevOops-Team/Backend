@@ -16,17 +16,21 @@ var t0 = time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC)
 
 type fakeScheduler struct{ statuses []model.JobStatus }
 
-func (f fakeScheduler) Submit(context.Context, *unstructured.Unstructured) error { return nil }
-func (f fakeScheduler) List(context.Context) ([]model.JobStatus, error)          { return f.statuses, nil }
-func (f fakeScheduler) Delete(context.Context, string) error                     { return nil }
+func (f fakeScheduler) Submit(context.Context, *unstructured.Unstructured) error  { return nil }
+func (f fakeScheduler) List(context.Context) ([]model.JobStatus, error)           { return f.statuses, nil }
+func (f fakeScheduler) Delete(context.Context, string) error                      { return nil }
+func (f fakeScheduler) Stop(context.Context, string, time.Time) ([]string, error) { return nil, nil }
 
 type fakeRecords struct {
 	rows  []model.StatusRow
 	runs  []model.RunRecord
 	ckpts []model.CheckpointRecord
 	final *model.FinalCheckpoint
+	gone  []model.StatusRow
 	err   error
 }
+
+func (f fakeRecords) Gone(context.Context, []string) ([]model.StatusRow, error) { return f.gone, f.err }
 
 func (f fakeRecords) Statuses(context.Context, []string) ([]model.StatusRow, error) {
 	return f.rows, f.err

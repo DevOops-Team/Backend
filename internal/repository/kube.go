@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
-	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -108,6 +108,55 @@ func (c *Kube) Delete(ctx context.Context, jobID string) error {
 	return nil
 }
 
+// Stop ends a user's job (GPU-204). Every JobSet of the job that has not finished first gets the stop
+// annotations, so the job watcher reports job.cancelled instead of job.stopped, and is then deleted the same
+// way as Delete. The delete is pinned to the annotated object's UID: a JobSet recreated under the same name in
+// between is left alone. The stop happens at the delete; the workers' pods go with the Workload.
+// It returns the names of the JobSets it stopped (none when the job has nothing left to stop).
+func (c *Kube) Stop(ctx context.Context, jobID string, requestedAt time.Time) ([]string, error) {
+	res := c.dyn.Resource(JobSetGVR).Namespace(c.namespace)
+	l, err := res.List(ctx, metav1.ListOptions{LabelSelector: model.JobIDLabel + "=" + jobID})
+	if err != nil {
+		return nil, fmt.Errorf("list jobsets: %w", err)
+	}
+	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{
+		model.StopReasonAnnotation:      model.StopReasonUser,
+		model.StopRequestedAtAnnotation: requestedAt.UTC().Format(time.RFC3339),
+	}}})
+	if err != nil {
+		return nil, err
+	}
+	background := metav1.DeletePropagationBackground
+	var stopped []string
+	for i := range l.Items {
+		js := &l.Items[i]
+		if done, _ := conditionOf(js, "Completed"); done {
+			continue
+		}
+		if done, _ := conditionOf(js, "Failed"); done {
+			continue
+		}
+		name := js.GetName()
+		if !stopRequested(js) { // a repeated request keeps the first time
+			_, err := res.Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			if err != nil {
+				return stopped, fmt.Errorf("annotate jobset %s: %w", name, err)
+			}
+		}
+		uid := js.GetUID()
+		err := res.Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &background,
+			Preconditions: &metav1.Preconditions{UID: &uid}})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return stopped, fmt.Errorf("delete jobset %s: %w", name, err)
+		}
+		stopped = append(stopped, name)
+	}
+	return stopped, nil
+}
+
 // Events lists core/v1 Events of the training namespace (timeline.Source).
 func (c *Kube) Events(ctx context.Context) ([]unstructured.Unstructured, error) {
 	l, err := c.dyn.Resource(EventGVR).Namespace(c.namespace).List(ctx, metav1.ListOptions{})
@@ -127,27 +176,8 @@ func (c *Kube) Workloads(ctx context.Context) ([]unstructured.Unstructured, erro
 }
 
 func status(id string, js, wl *unstructured.Unstructured) model.JobStatus {
-	labels, ann := js.GetLabels(), js.GetAnnotations()
-	st := model.JobStatus{
-		ID:           id,
-		Name:         js.GetName(),
-		Model:        ann[model.ModelAnnotation],
-		Strategy:     ann[model.StrategyAnnotation],
-		Generation:   atoi(labels[model.GenerationLabel]),
-		GPUs:         atoi(ann[model.WorldSizeAnnotation]),
-		JobsetName:   js.GetName(),
-		Queue:        labels[model.QueueLabel],
-		Dataset:      parseDataset(ann[model.DatasetAnnotation]),
-		ConfigSHA256: ann[model.ConfigSHA256Annotation],
-		Phase:        model.PhasePending,
-		CreatedAt:    js.GetCreationTimestamp().Time,
-	}
-	if name := ann[model.NameAnnotation]; name != "" {
-		st.Name = name
-	}
-	if raw := ann[model.HyperparametersAnnotation]; raw != "" {
-		_ = json.Unmarshal([]byte(raw), &st.Hyperparameters) // only informational
-	}
+	st := model.JobStatusFromMeta(id, js.GetName(), js.GetLabels(), js.GetAnnotations())
+	st.CreatedAt = js.GetCreationTimestamp().Time
 	st.Restarts, _, _ = unstructured.NestedInt64(js.Object, "status", "restarts")
 
 	if wl != nil {
@@ -162,29 +192,23 @@ func status(id string, js, wl *unstructured.Unstructured) model.JobStatus {
 	if active(js) > 0 {
 		st.Phase = model.PhaseRunning
 	}
-	if ok, msg := conditionOf(js, "Completed"); ok {
+	completed, msg := conditionOf(js, "Completed")
+	if completed {
 		st.Phase, st.Message = model.PhaseSucceeded, msg
 	}
-	if ok, msg := conditionOf(js, "Failed"); ok {
+	failed, msg := conditionOf(js, "Failed")
+	if failed {
 		st.Phase, st.Message = model.PhaseFailed, msg
 	}
 	st.Status = model.StatusOf(st.Phase)
+	if stopRequested(js) && !completed && !failed {
+		st.Status = model.StatusStopping // being deleted after a stop request (GPU-204)
+	}
 	return st
 }
 
-func atoi(s string) int {
-	n, _ := strconv.Atoi(s) // 0 for JobSets that lack the value
-	return n
-}
-
-// parseDataset reads the devoops/dataset annotation, "<id>/v<version>".
-func parseDataset(s string) *model.DatasetRef {
-	id, v, ok := strings.Cut(s, "/v")
-	version, err := strconv.Atoi(v)
-	if !ok || err != nil {
-		return nil
-	}
-	return &model.DatasetRef{ID: id, Version: version}
+func stopRequested(js *unstructured.Unstructured) bool {
+	return js.GetAnnotations()[model.StopReasonAnnotation] != ""
 }
 
 // conditionOf reports whether condition typ is True, and its message either way.

@@ -77,6 +77,43 @@ func (r *JobRecords) Statuses(ctx context.Context, ids []string) ([]model.Status
 	return out, rows.Err()
 }
 
+// Gone returns the v_job_status rows of jobs whose JobSets are not among ids but that the list still shows
+// (GPU-204): stopped or cancelled, fenced (the relocator has not created the next generation yet) or not
+// ended (a stop whose end event has not arrived). Completed and failed jobs have no reason to lose their
+// JobSet except a delete, so they stay out.
+func (r *JobRecords) Gone(ctx context.Context, ids []string) ([]model.StatusRow, error) {
+	if r.pool == nil {
+		return nil, nil
+	}
+	if ids == nil {
+		ids = []string{} // a NULL array would make NOT (... = ANY) NULL and hide every row
+	}
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+	rows, err := r.pool.Query(ctx, `
+		SELECT s.job_id, s.generation, s.exp_id, s.cluster, s.state, s.submitted_at, s.started_at, s.ended_at,
+		       s.recovery_count, s.progress_status, s.step, s.total_steps, s.loss, s.progress_updated_at,
+		       s.last_approved_step, s.last_approved_at,
+		       (SELECT min(r.submitted_at) FROM data.job_runs r WHERE r.job_id = s.job_id)
+		FROM data.v_job_status s
+		WHERE NOT (s.job_id = ANY($1)) AND s.state NOT IN ('COMPLETED', 'FAILED')`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("query v_job_status: %w", err)
+	}
+	defer rows.Close()
+	var out []model.StatusRow
+	for rows.Next() {
+		var s model.StatusRow
+		if err := rows.Scan(&s.JobID, &s.Generation, &s.ExpID, &s.Cluster, &s.State, &s.SubmittedAt, &s.StartedAt,
+			&s.EndedAt, &s.RecoveryCount, &s.ProgressStatus, &s.Step, &s.TotalSteps, &s.Loss, &s.ProgressUpdatedAt,
+			&s.LastApprovedStep, &s.LastApprovedAt, &s.FirstSubmittedAt); err != nil {
+			return nil, fmt.Errorf("scan v_job_status: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // History returns the job's generations and approved checkpoints, oldest first.
 func (r *JobRecords) History(ctx context.Context, jobID string) ([]model.RunRecord, []model.CheckpointRecord, error) {
 	if r.pool == nil {
