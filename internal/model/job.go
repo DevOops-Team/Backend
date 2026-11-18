@@ -210,6 +210,17 @@ type SubmitSpec struct {
 	// ExpID is the experiment the job belongs to (잡 투입기, GPU-172). Optional; it goes to job.submitted
 	// and the JobSet annotation devoops/exp-id so the collector links the experiment and the job.
 	ExpID string `json:"exp_id,omitempty"`
+	// Dataset submits with a fixed dataset already in S3 (datasets/<id>/v<version>/ with its manifest)
+	// instead of file parts (GPU-200): the 잡 투입기 sends the same model · data · train.py for every job
+	// of an experiment, so it is put there once. With it the request has no file parts.
+	Dataset *SpecDataset `json:"dataset,omitempty"`
+}
+
+// SpecDataset names a fixed dataset. Its id has a '-' so it never looks like a job ID: a job's own
+// upload (datasets/<job id>/) goes when the job is deleted, a fixed dataset stays.
+type SpecDataset struct {
+	ID      string `json:"id"`
+	Version int    `json:"version"`
 }
 
 // TrainConfig is config.json. train.py rejects missing and unknown keys, so every key is always written.

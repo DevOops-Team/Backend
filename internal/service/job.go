@@ -219,40 +219,30 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 	}
 
 	id := s.cfg.NewID()
-	prefix := datasetPrefix(id, datasetVersion)
-	up, err := s.receive(ctx, prefix, src)
+	var ds datasetInput
+	if spec.Dataset != nil {
+		ds, err = s.fixedDataset(ctx, *spec.Dataset, src)
+	} else {
+		ds, err = s.uploadDataset(ctx, id, src)
+	}
 	if err != nil {
 		return model.CreatedJob{}, err
 	}
 
-	manifest := model.DatasetManifest{
-		SchemaVersion: manifestSchema, JobID: id, Model: up.modelName, Format: s.cfg.Settings.Training.DatasetFormat,
-		Files: up.entries, ModelBytes: up.modelBytes, DataBytes: up.dataBytes,
-		CreatedAt: s.cfg.Now().UTC().Format(time.RFC3339),
-	}
-	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return model.CreatedJob{}, fmt.Errorf("encode manifest: %w", err)
-	}
-	if err := s.objects.Put(ctx, prefix+manifestName, bytes.NewReader(manifestBytes)); err != nil {
-		return model.CreatedJob{}, upstream("upload "+manifestName, err)
-	}
-	manifestSHA := sha256Hex(manifestBytes)
-
 	name := spec.Name
 	if name == "" {
-		name = defaultName(up.modelName, id)
+		name = defaultName(ds.modelName, id)
 	}
 	checkpointFormat := s.cfg.Settings.Strategies[strategy].CheckpointFormat
 	configBytes, err := json.MarshalIndent(model.TrainConfig{
 		SchemaVersion:    configSchema,
-		Model:            up.modelName,
+		Model:            ds.modelName,
 		TrainingMode:     strategy,
 		CheckpointFormat: checkpointFormat,
 		Dataset: model.ConfigDataset{
-			URI:            fmt.Sprintf("s3://%s/%s", s.cfg.Bucket, prefix),
+			URI:            fmt.Sprintf("s3://%s/%s", s.cfg.Bucket, ds.prefix),
 			Format:         s.cfg.Settings.Training.DatasetFormat,
-			ManifestSHA256: manifestSHA,
+			ManifestSHA256: ds.manifestSHA,
 		},
 		Epochs:           merged.Epochs,
 		MaxSteps:         merged.MaxSteps,
@@ -261,7 +251,7 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 		WarmupSteps:      merged.WarmupSteps,
 		Seed:             merged.Seed,
 		WorldSize:        spec.GPUs,
-		CheckpointPolicy: ckptpolicy.Compute(up.modelBytes, s.cfg.Settings.Checkpoint),
+		CheckpointPolicy: ckptpolicy.Compute(ds.modelBytes, s.cfg.Settings.Checkpoint),
 	}, "", "  ")
 	if err != nil {
 		return model.CreatedJob{}, fmt.Errorf("encode config: %w", err)
@@ -269,8 +259,8 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 	configSHA := sha256Hex(configBytes)
 
 	js, err := jobspec.Render(jobspec.Input{
-		JobID: id, Generation: firstGeneration, Name: name, Model: up.modelName, Strategy: strategy, GPUs: spec.GPUs,
-		DatasetID: id, DatasetVersion: datasetVersion, DatasetManifestSHA256: manifestSHA, ConfigSHA256: configSHA,
+		JobID: id, Generation: firstGeneration, Name: name, Model: ds.modelName, Strategy: strategy, GPUs: spec.GPUs,
+		DatasetID: ds.id, DatasetVersion: ds.version, DatasetManifestSHA256: ds.manifestSHA, ConfigSHA256: configSHA,
 		CheckpointFormat: checkpointFormat, Hyperparameters: spec.Hyperparameters, ExpID: spec.ExpID, Queue: queue,
 		Namespace: s.cfg.Namespace, Region: s.cfg.Region, Bucket: s.cfg.Bucket, FencingTable: s.cfg.FencingTable,
 		KafkaBootstrap: s.cfg.KafkaBootstrap, KafkaTopic: s.cfg.KafkaTopic,
@@ -288,7 +278,7 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 	for _, f := range []struct {
 		name string
 		body []byte
-	}{{trainCodeName, up.train}, {"config.json", configBytes}, {"jobset.json", jobsetBytes}} {
+	}{{trainCodeName, ds.train}, {"config.json", configBytes}, {"jobset.json", jobsetBytes}} {
 		if err := s.objects.Put(ctx, "code/"+id+"/"+f.name, bytes.NewReader(f.body)); err != nil {
 			return model.CreatedJob{}, upstream("upload "+f.name, err)
 		}
@@ -314,12 +304,96 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 		OccurredAt: now,
 	})
 
-	slog.Info("job submitted", "id", id, "name", js.GetName(), "model", up.modelName, "strategy", strategy,
-		"gpus", spec.GPUs, "modelBytes", up.modelBytes, "dataBytes", up.dataBytes)
+	slog.Info("job submitted", "id", id, "name", js.GetName(), "model", ds.modelName, "strategy", strategy,
+		"gpus", spec.GPUs, "dataset", ds.prefix, "modelBytes", ds.modelBytes, "dataBytes", ds.dataBytes)
 	return model.CreatedJob{
 		ID: id, Name: name, Status: model.StatusQueued, Generation: firstGeneration, JobsetName: js.GetName(),
 		Queue: queue, Config: configBytes, ConfigSHA256: configSHA, CreatedAt: now,
 	}, nil
+}
+
+// datasetInput is the dataset a job trains on: its own upload or a fixed dataset.
+type datasetInput struct {
+	id                    string
+	version               int
+	prefix                string // datasets/<id>/v<version>/
+	modelName             string
+	modelBytes, dataBytes int64
+	train                 []byte // code/train.py, copied to code/<job id>/ for the file viewer
+	manifestSHA           string
+}
+
+// uploadDataset stores the file parts as the job's own dataset, datasets/<job id>/v1/, with its manifest.
+func (s *JobService) uploadDataset(ctx context.Context, id string, src UploadSource) (datasetInput, error) {
+	prefix := datasetPrefix(id, datasetVersion)
+	up, err := s.receive(ctx, prefix, src)
+	if err != nil {
+		return datasetInput{}, err
+	}
+	manifest := model.DatasetManifest{
+		SchemaVersion: manifestSchema, JobID: id, Model: up.modelName, Format: s.cfg.Settings.Training.DatasetFormat,
+		Files: up.entries, ModelBytes: up.modelBytes, DataBytes: up.dataBytes,
+		CreatedAt: s.cfg.Now().UTC().Format(time.RFC3339),
+	}
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return datasetInput{}, fmt.Errorf("encode manifest: %w", err)
+	}
+	if err := s.objects.Put(ctx, prefix+manifestName, bytes.NewReader(manifestBytes)); err != nil {
+		return datasetInput{}, upstream("upload "+manifestName, err)
+	}
+	return datasetInput{id: id, version: datasetVersion, prefix: prefix, modelName: up.modelName,
+		modelBytes: up.modelBytes, dataBytes: up.dataBytes, train: up.train, manifestSHA: sha256Hex(manifestBytes)}, nil
+}
+
+// fixedDataset uses a dataset put in S3 once (GPU-200) instead of an upload: nothing is uploaded or
+// copied, the pods download it from datasets/<id>/v<version>/ like any other. The request must have no
+// file parts, and the manifest must list what an upload would (model/config.json, data/*.jsonl,
+// code/train.py) in the training data format.
+func (s *JobService) fixedDataset(ctx context.Context, ref model.SpecDataset, src UploadSource) (datasetInput, error) {
+	if _, err := src.Next(); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return datasetInput{}, invalid("read upload: " + err.Error())
+		}
+		return datasetInput{}, invalid("spec.dataset를 쓰면 파일 파트(model · data · train)를 보내지 않습니다")
+	}
+	prefix := datasetPrefix(ref.ID, ref.Version)
+	bad := func(msg string) error {
+		return invalidFields([]model.FieldError{{Field: "dataset", Message: msg + ": s3://" + s.cfg.Bucket + "/" + prefix}})
+	}
+	raw, _, err := s.objects.Get(ctx, prefix+manifestName, maxMetadataBytes)
+	if errors.Is(err, model.ErrNotFound) {
+		return datasetInput{}, bad("데이터셋이 없습니다")
+	}
+	if err != nil {
+		return datasetInput{}, upstream("read dataset manifest", err)
+	}
+	var m model.DatasetManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return datasetInput{}, bad("manifest.json을 읽을 수 없습니다")
+	}
+	if m.Model == "" {
+		return datasetInput{}, bad("manifest에 model(모델 폴더 이름)이 없습니다")
+	}
+	if m.Format != s.cfg.Settings.Training.DatasetFormat {
+		return datasetInput{}, bad(fmt.Sprintf("데이터 형식이 %s가 아닙니다 (%s)", s.cfg.Settings.Training.DatasetFormat, m.Format))
+	}
+	i := slices.IndexFunc(m.Files, func(e model.ManifestEntry) bool { return e.Name == trainName })
+	if i < 0 || !slices.ContainsFunc(m.Files, func(e model.ManifestEntry) bool { return e.Name == modelConfigName }) ||
+		!slices.ContainsFunc(m.Files, func(e model.ManifestEntry) bool {
+			return strings.HasPrefix(e.Name, "data/") && strings.HasSuffix(e.Name, ".jsonl")
+		}) {
+		return datasetInput{}, bad("manifest에 model/config.json · data/*.jsonl · code/train.py가 모두 있어야 합니다")
+	}
+	train, size, err := s.objects.Get(ctx, prefix+trainName, MaxTrainBytes)
+	if err != nil {
+		return datasetInput{}, upstream("read dataset train.py", err)
+	}
+	if size > MaxTrainBytes || sha256Hex(train) != m.Files[i].SHA256 {
+		return datasetInput{}, bad("code/train.py가 manifest와 다릅니다")
+	}
+	return datasetInput{id: ref.ID, version: ref.Version, prefix: prefix, modelName: m.Model,
+		modelBytes: m.ModelBytes, dataBytes: m.DataBytes, train: train, manifestSHA: sha256Hex(raw)}, nil
 }
 
 // received is what the file parts of one submission turned into.
@@ -508,6 +582,14 @@ func (s *JobService) validate(spec model.SubmitSpec) (string, settings.Defaults,
 	}
 	merged, hfields := mergeHyperparameters(tr, spec.Hyperparameters)
 	fields = append(fields, hfields...)
+	if d := spec.Dataset; d != nil {
+		if !validName.MatchString(d.ID) || !strings.Contains(d.ID, "-") {
+			bad("dataset.id", "고정 데이터셋 이름: 소문자 · 숫자 · '-', '-'를 1개 이상 포함 (예: smollm2-wikitext2)")
+		}
+		if d.Version < 1 {
+			bad("dataset.version", "1 이상이어야 합니다")
+		}
+	}
 	if len(fields) > 0 {
 		return "", settings.Defaults{}, invalidFields(fields)
 	}
