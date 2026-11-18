@@ -50,6 +50,9 @@ type Scheduler interface {
 	List(ctx context.Context) ([]model.JobStatus, error)
 	// Delete removes every generation's JobSet of the job. No JobSet left is not an error.
 	Delete(ctx context.Context, jobID string) error
+	// Stop annotates the job's unfinished JobSets as stopped by the user at requestedAt and deletes them
+	// (GPU-204). It returns their names; none when nothing was left to stop.
+	Stop(ctx context.Context, jobID string, requestedAt time.Time) ([]string, error)
 }
 
 // JobRecords reads what the data database recorded about jobs (Kafka job.lifecycle → collector →
@@ -60,6 +63,9 @@ type JobRecords interface {
 	History(ctx context.Context, jobID string) ([]model.RunRecord, []model.CheckpointRecord, error)
 	// FinalCheckpoint returns the newest approved checkpoint, or nil when the job has none.
 	FinalCheckpoint(ctx context.Context, jobID string) (*model.FinalCheckpoint, error)
+	// Gone returns the rows of jobs that are not among ids (no JobSet) and have not completed or failed:
+	// stopped, being stopped or being relocated (GPU-204). FirstSubmittedAt is set.
+	Gone(ctx context.Context, ids []string) ([]model.StatusRow, error)
 }
 
 // Fencing creates the job's first fencing item (DynamoDB); model.ErrAlreadyExists if it exists.
@@ -141,6 +147,7 @@ type JobService struct {
 	lifecycle Lifecycle
 	events    EventReader
 	record    EventWriter
+	subs      submissions // jobset.json of jobs whose JobSets are gone (stop.go)
 }
 
 // Deps are the repositories the service uses.
@@ -597,7 +604,8 @@ func (s *JobService) report(ctx context.Context, e model.SubmittedEvent) {
 }
 
 // List returns the jobs on the management cluster with their database view (status · progress), newest
-// first. The database is best-effort: when it is down the jobs still show the cluster's state.
+// first, plus the jobs a stop has taken the JobSets from (GPU-204). The database is best-effort: when it is
+// down the jobs still show the cluster's state (and stopped jobs are missing until it is back).
 func (s *JobService) List(ctx context.Context) ([]model.Job, error) {
 	statuses, err := s.sched.List(ctx)
 	if err != nil {
@@ -611,6 +619,15 @@ func (s *JobService) List(ctx context.Context) ([]model.Job, error) {
 	rows, err := s.records.Statuses(ctx, ids)
 	if err != nil {
 		slog.Warn("read job status from the data database", "err", err)
+	}
+	if err == nil {
+		// A stopped job has no JobSet left; list it from the database and its jobset.json (GPU-204).
+		gone, err := s.records.Gone(ctx, ids)
+		if err != nil {
+			slog.Warn("read stopped jobs from the data database", "err", err)
+		}
+		statuses = append(statuses, s.gone(ctx, gone)...)
+		rows = append(rows, gone...)
 	}
 	for _, r := range rows {
 		views[r.JobID] = jobview.FromStatus(r)
