@@ -1,5 +1,5 @@
 # 협업 규칙 §7 CI 파이프라인.
-#   PR(→ develop, → main), develop push : 린트(Go · OpenAPI) · 테스트 · 빌드 + 이미지 빌드 (push 안 함)
+#   PR(→ develop, → main)              : 린트(Go · OpenAPI) · 테스트 · 빌드 + 이미지 빌드 (push 안 함)
 #   main push(머지)             : 같은 검사 → 릴리스 버전 계산 → 이미지 push  ghcr.io/devoops-team/backend:{X.Y.Z, X.Y, main, sha-<7자리>}
 #                                 → 버전 봇이 태그 vX.Y.Z · Release 생성 → 배포 봇이 Gitops overlay에 X.Y.Z@digest 반영
 #   버전 · description은 develop → main PR 본문의 '## 릴리스 노트'에서 나온다 (GPU-136, 형식은 .github/pull_request_template.md).
@@ -11,7 +11,7 @@ on:
   pull_request:
     branches: [develop, main]
   push:
-    branches: [develop, main]
+    branches: [main]   # develop 커밋은 PR에서 점검 — push까지 걸면 같은 커밋이 두 번 돈다 (GPU-214)
 
 permissions:
   contents: read
