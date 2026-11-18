@@ -1,0 +1,222 @@
+package service
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"strings"
+	"testing"
+	"time"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/DevOops-Team/Backend/internal/model"
+	"github.com/DevOops-Team/Backend/internal/settings"
+)
+
+// bucketObjects is an in-memory bucket that keeps what Put writes.
+type bucketObjects struct{ fakeObjects }
+
+func (b bucketObjects) Put(_ context.Context, key string, body io.Reader) error {
+	data, err := io.ReadAll(body)
+	b.fakeObjects[key] = string(data)
+	return err
+}
+
+type submitted struct{ js *unstructured.Unstructured }
+
+func (s *submitted) Submit(_ context.Context, js *unstructured.Unstructured) error {
+	s.js = js
+	return nil
+}
+func (s *submitted) List(context.Context) ([]model.JobStatus, error)           { return nil, nil }
+func (s *submitted) Delete(context.Context, string) error                      { return nil }
+func (s *submitted) Stop(context.Context, string, time.Time) ([]string, error) { return nil, nil }
+
+type noFencing struct{}
+
+func (noFencing) Create(context.Context, string) error { return nil }
+
+type noLifecycle struct{}
+
+func (noLifecycle) Submitted(context.Context, model.SubmittedEvent) error { return nil }
+
+type noRecord struct{}
+
+func (noRecord) Put(context.Context, model.JobEvent) error { return nil }
+
+// parts is an UploadSource over fixed uploads.
+type parts []Upload
+
+func (p *parts) Next() (Upload, error) {
+	if len(*p) == 0 {
+		return Upload{}, io.EOF
+	}
+	u := (*p)[0]
+	*p = (*p)[1:]
+	return u, nil
+}
+
+const (
+	fixedPrefix = "datasets/smollm2-wikitext2/v1/"
+	fixedTrain  = "print('train')\n"
+)
+
+func hexSum(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+func fixedManifest(t *testing.T, edit func(*model.DatasetManifest)) string {
+	m := model.DatasetManifest{SchemaVersion: 1, Model: "SmolLM2-135M", Format: "text-jsonl", ModelBytes: 269060552, DataBytes: 10926306,
+		Files: []model.ManifestEntry{
+			{Name: "code/train.py", SHA256: hexSum(fixedTrain), SizeBytes: int64(len(fixedTrain))},
+			{Name: "data/wikitext-2-train.jsonl", SHA256: "aa", SizeBytes: 10926306},
+			{Name: "model/config.json", SHA256: "bb", SizeBytes: 704},
+		}}
+	if edit != nil {
+		edit(&m)
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func submitService(t *testing.T, objs fakeObjects, sched *submitted) *JobService {
+	cfg, err := settings.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewJobService(Config{Namespace: "training", Region: "us-east-2", Bucket: "ckpt",
+		Settings: cfg.WithImages("ghcr.io/x/trainer:1", "ghcr.io/x/checkpoint:1"),
+		NewID:    func() string { return "a1b2c3d4" }},
+		Deps{Objects: bucketObjects{objs}, Scheduler: sched, Fencing: noFencing{}, Lifecycle: noLifecycle{}, Record: noRecord{}})
+}
+
+func fixedSpec() model.SubmitSpec {
+	return model.SubmitSpec{GPUs: 2, Hyperparameters: map[string]any{"max_steps": float64(600)}, ExpID: "exp-0001",
+		Dataset: &model.SpecDataset{ID: "smollm2-wikitext2", Version: 1}}
+}
+
+func TestSubmitWithFixedDatasetUploadsNothingAndPointsThePodsAtIt(t *testing.T) {
+	manifest := fixedManifest(t, nil)
+	objs := fakeObjects{fixedPrefix + "manifest.json": manifest, fixedPrefix + "code/train.py": fixedTrain}
+	sched := &submitted{}
+	created, err := submitService(t, objs, sched).Submit(context.Background(), fixedSpec(), &parts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for key := range objs {
+		if strings.HasPrefix(key, "datasets/") && !strings.HasPrefix(key, fixedPrefix) {
+			t.Errorf("wrote a dataset object %s; a fixed dataset is used in place", key)
+		}
+	}
+	if objs[fixedPrefix+"manifest.json"] != manifest {
+		t.Error("the fixed dataset's manifest was rewritten")
+	}
+	if objs["code/a1b2c3d4/train.py"] != fixedTrain {
+		t.Error("train.py was not copied to code/<job id>/ for the file viewer")
+	}
+
+	var cfg model.TrainConfig
+	if err := json.Unmarshal(created.Config, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model != "SmolLM2-135M" || cfg.Dataset.URI != "s3://ckpt/"+fixedPrefix || cfg.Dataset.ManifestSHA256 != hexSum(manifest) {
+		t.Errorf("config model %q dataset %+v", cfg.Model, cfg.Dataset)
+	}
+	if cfg.MaxSteps == nil || *cfg.MaxSteps != 600 {
+		t.Errorf("max_steps = %v, want 600", cfg.MaxSteps)
+	}
+	js, _ := json.Marshal(sched.js.Object)
+	for _, want := range []string{`"s3://ckpt/` + fixedPrefix + `"`, `"smollm2-wikitext2/v1"`, `"exp-0001"`, hexSum(manifest)} {
+		if !strings.Contains(string(js), want) {
+			t.Errorf("JobSet lacks %s", want)
+		}
+	}
+}
+
+func TestSubmitWithFixedDatasetRejects(t *testing.T) {
+	good := fixedManifest(t, nil)
+	cases := []struct {
+		name  string
+		spec  func(*model.SubmitSpec)
+		objs  fakeObjects
+		parts parts
+	}{
+		{name: "a job ID, whose upload goes with the job", spec: func(s *model.SubmitSpec) { s.Dataset.ID = "0da414c1" }},
+		{name: "version 0", spec: func(s *model.SubmitSpec) { s.Dataset.Version = 0 }},
+		{name: "file parts with it", parts: parts{{Field: "data", Path: "x.jsonl", Body: strings.NewReader("{}")}},
+			objs: fakeObjects{fixedPrefix + "manifest.json": good, fixedPrefix + "code/train.py": fixedTrain}},
+		{name: "a dataset that is not there", objs: fakeObjects{}},
+		{name: "a manifest without train.py",
+			objs: fakeObjects{fixedPrefix + "manifest.json": fixedManifest(t, func(m *model.DatasetManifest) { m.Files = m.Files[1:] })}},
+		{name: "another data format",
+			objs: fakeObjects{fixedPrefix + "manifest.json": fixedManifest(t, func(m *model.DatasetManifest) { m.Format = "parquet" }),
+				fixedPrefix + "code/train.py": fixedTrain}},
+		{name: "a train.py that differs from the manifest",
+			objs: fakeObjects{fixedPrefix + "manifest.json": good, fixedPrefix + "code/train.py": "changed"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			spec := fixedSpec()
+			if c.spec != nil {
+				c.spec(&spec)
+			}
+			objs := c.objs
+			if objs == nil {
+				objs = fakeObjects{}
+			}
+			sched := &submitted{}
+			_, err := submitService(t, objs, sched).Submit(context.Background(), spec, &c.parts)
+			if kindOf(err) != KindInvalid {
+				t.Fatalf("err = %v, want invalid", err)
+			}
+			if sched.js != nil {
+				t.Error("a JobSet was submitted")
+			}
+			for key := range objs {
+				if strings.HasPrefix(key, "code/") {
+					t.Errorf("wrote %s before rejecting", key)
+				}
+			}
+		})
+	}
+}
+
+func TestSubmitWithUploadStillStoresItAsTheJobsOwnDataset(t *testing.T) {
+	objs := fakeObjects{}
+	sched := &submitted{}
+	up := parts{
+		{Field: "model", Path: "gpt2/config.json", Body: strings.NewReader("{}")},
+		{Field: "data", Path: "train.jsonl", Body: strings.NewReader(`{"text":"a"}`)},
+		{Field: "train", Path: "my_train.py", Body: strings.NewReader(fixedTrain)},
+	}
+	created, err := submitService(t, objs, sched).Submit(context.Background(), model.SubmitSpec{GPUs: 1}, &up)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const prefix = "datasets/a1b2c3d4/v1/"
+	var m model.DatasetManifest
+	if err := json.Unmarshal([]byte(objs[prefix+"manifest.json"]), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Model != "gpt2" || len(m.Files) != 3 || objs[prefix+"code/train.py"] != fixedTrain || objs["code/a1b2c3d4/train.py"] != fixedTrain {
+		t.Errorf("manifest %+v", m)
+	}
+	var cfg model.TrainConfig
+	if err := json.Unmarshal(created.Config, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Dataset.URI != "s3://ckpt/"+prefix || cfg.Dataset.ManifestSHA256 != hexSum(objs[prefix+"manifest.json"]) {
+		t.Errorf("config dataset %+v", cfg.Dataset)
+	}
+	if js, _ := json.Marshal(sched.js.Object); !strings.Contains(string(js), `"a1b2c3d4/v1"`) {
+		t.Error("JobSet dataset annotation is not the job's own upload")
+	}
+}

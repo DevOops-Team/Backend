@@ -1,6 +1,6 @@
 # 학습 작업 입력 형식 (이전 방식)
 
-> 더 이상 쓰지 않는다. `POST /api/jobs`는 multipart가 아니라 JSON이다. 정본은 `api/openapi.yaml`과 Confluence `서비스 API 명세`다.
+> 더 이상 쓰지 않는다. 지금 `POST /api/jobs`는 이 문서와 다른 multipart(`spec` + `model/…` · `data/*.jsonl` · `train/*.py` 파트, 또는 `spec.dataset`만)다. 정본은 `api/openapi.yaml`과 Confluence `서비스 API 명세`다.
 
 프론트(웹 제출 화면)가 백엔드 `POST /api/jobs`로 보내는 입력의 정본이다. 백엔드 검증(`internal/service`, `internal/service/jobspec`)과 프론트 폼(`Frontend/src/components/UploadForm.tsx`)이 이 문서를 따른다. 바꾸면 이 문서부터 고친다. 응답 JSON 스키마 등 API 전체는 Swagger(`/swagger/`, `api/openapi.yaml`)에 있다.
 
