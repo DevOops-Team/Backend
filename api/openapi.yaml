@@ -166,7 +166,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/JobID"
       responses:
-        "202": { description: 중단함 (JobSet 삭제, 종료 사건 대기) }
+        "202": { description: "중단함 (JobSet 삭제, 종료 사건 대기)" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409":
