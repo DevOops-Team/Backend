@@ -32,7 +32,9 @@ const (
 	StatusSucceeded  Status = "SUCCEEDED"
 	StatusFailed     Status = "FAILED"
 	StatusRecovering Status = "RECOVERING" // job.fenced: 재배치 요청으로 세대를 내림, 다음 세대 대기
-	StatusCancelled  Status = "CANCELLED"  // job.stopped: 사용자 · Backend가 중지
+	StatusCancelled  Status = "CANCELLED"  // job.stopped · job.cancelled: 사용자 · Backend가 중지
+	// 중단 요청을 받아 JobSet에 주석을 달고 지웠으나 감시기의 종료 사건(job.cancelled)이 아직 데이터 DB에 없음 (GPU-204)
+	StatusStopping Status = "STOPPING"
 )
 
 // StatusRank orders a generation's statuses; a later event never moves a generation backwards.
@@ -42,7 +44,8 @@ func StatusRank(s Status) int {
 		return 1
 	case StatusRunning:
 		return 2
-	case StatusSucceeded, StatusFailed, StatusRecovering, StatusCancelled:
+	// STOPPING is final for the screen too: only the end event (CANCELLED, or whatever ended it first) replaces it.
+	case StatusSucceeded, StatusFailed, StatusRecovering, StatusCancelled, StatusStopping:
 		return 3
 	}
 	return 0
@@ -124,6 +127,7 @@ type StatusRow struct {
 	ProgressUpdatedAt *time.Time
 	LastApprovedStep  *int64
 	LastApprovedAt    *time.Time
+	FirstSubmittedAt  *time.Time // generation 1's submission; only JobRecords.Gone fills it
 }
 
 // RunRecord is one generation of a job (data.job_runs).

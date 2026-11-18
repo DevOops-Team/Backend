@@ -150,6 +150,32 @@ paths:
         "409": { $ref: "#/components/responses/NotFinished" }
         "502": { $ref: "#/components/responses/BadGateway" }
 
+  /api/jobs/{id}/stop:
+    post:
+      tags: [jobs]
+      summary: 학습 중단 (사용자 요청)
+      operationId: stopJob
+      description: |
+        대기 · 입장 · 실행 중(QUEUED · ADMITTED · RUNNING)인 작업을 멈춘다. 끝나지 않은 JobSet마다 주석
+        `devoops/stop-reason: user` · `devoops/stop-requested-at`(RFC 3339 UTC)을 단 뒤 지운다(Background 전파 →
+        Workload · Job · 워커 쪽 복사본 정리). 감시기가 이 주석을 보고 `job.cancelled`를 보내면 데이터 DB 상태가
+        CANCELLED가 되고, 그 전까지 작업 상태는 STOPPING이다. JobSet이 없어도 작업은 목록에 남는다(S3 `code/<id>/jobset.json` +
+        데이터 DB). 이미 STOPPING이면 아무것도 하지 않고 202.
+        - 409 `RECOVERING`: 재배치 중(다음 세대를 재배치 실행기가 곧 만듦). 다시 실행된 뒤 중단한다.
+        - 409 `FINISHED`: 이미 끝남 (SUCCEEDED · FAILED · CANCELLED)
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "202": { description: 중단함 (JobSet 삭제, 종료 사건 대기) }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: 재배치 중(code RECOVERING)이거나 이미 끝남(code FINISHED)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
   /api/jobs/{id}/events:
     get:
       tags: [jobs]
@@ -454,7 +480,7 @@ components:
 
     Status:
       type: string
-      enum: [QUEUED, ADMITTED, RUNNING, SUCCEEDED, FAILED, RECOVERING, CANCELLED]
+      enum: [QUEUED, ADMITTED, RUNNING, SUCCEEDED, FAILED, RECOVERING, CANCELLED, STOPPING]
       description: |
         화면에 쓰는 작업 상태. 데이터 DB `v_job_status.state` 기준 (PENDING → QUEUED, FENCED → RECOVERING, STOPPED · CANCELLED → CANCELLED)이며 한 세대 안에서는 앞으로만 바뀜.
         - QUEUED: job.submitted
@@ -462,7 +488,8 @@ components:
         - RUNNING: job.started · job.resumed (Pod 준비 완료)
         - SUCCEEDED · FAILED: job.completed · job.failed
         - RECOVERING: job.fenced (재배치 요청으로 세대를 내림, 다음 세대 대기)
-        - CANCELLED: job.stopped (사용자 · Backend 중지)
+        - CANCELLED: job.stopped · job.cancelled (사용자 · Backend 중지)
+        - STOPPING: 중단 요청으로 JobSet을 지웠고 종료 사건이 아직 데이터 DB에 없음 (POST /api/jobs/{id}/stop)
 
     Phase:
       type: string

@@ -37,6 +37,7 @@ func (s *JobService) Delete(ctx context.Context, id string) error {
 			return upstream("delete s3://"+prefix, err)
 		}
 	}
+	s.forget(id) // a stopped job is listed from code/<id>/jobset.json, which is gone now
 	if err := s.sched.Delete(ctx, id); err != nil {
 		return upstream("delete JobSets", err)
 	}

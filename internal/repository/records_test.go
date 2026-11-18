@@ -3,10 +3,13 @@ package repository
 import (
 	"context"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/DevOops-Team/Backend/internal/model"
 )
 
 func TestJobRecordsWithoutADatabaseReportNothing(t *testing.T) {
@@ -22,6 +25,9 @@ func TestJobRecordsWithoutADatabaseReportNothing(t *testing.T) {
 	runs, ckpts, err := r.History(t.Context(), "x")
 	if err != nil || runs != nil || ckpts != nil {
 		t.Errorf("History = %v, %v, %v; want nothing without PGHOST", runs, ckpts, err)
+	}
+	if gone, err := r.Gone(t.Context(), nil); err != nil || gone != nil {
+		t.Errorf("Gone = %v, %v; want nothing without PGHOST", gone, err)
 	}
 	final, err := r.FinalCheckpoint(t.Context(), "x")
 	if err != nil || final != nil {
@@ -84,6 +90,20 @@ func TestJobRecordsReadTheDataSchema(t *testing.T) {
 	if s.Generation != 2 || s.State != "RUNNING" || *s.Cluster != "eks-b" || s.RecoveryCount != 1 ||
 		*s.Step != 800 || *s.TotalSteps != 2080 || *s.LastApprovedStep != 694 {
 		t.Errorf("row = %+v", s)
+	}
+
+	// GPU-204: a job without a JobSet that has not ended is listed from the database, with its first submission.
+	gone, err := r.Gone(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(gone, func(g model.StatusRow) bool { return g.JobID == "rt000001" })
+	if i < 0 || gone[i].FirstSubmittedAt == nil || !gone[i].FirstSubmittedAt.Equal(t0) || gone[i].State != "RUNNING" {
+		t.Errorf("Gone(nil) = %+v, want rt000001 first submitted at %s", gone, t0)
+	}
+	if gone, err := r.Gone(ctx, []string{"rt000001"}); err != nil ||
+		slices.ContainsFunc(gone, func(g model.StatusRow) bool { return g.JobID == "rt000001" }) {
+		t.Errorf("Gone(listed) = %+v, %v; want rt000001 left out", gone, err)
 	}
 
 	runs, ckpts, err := r.History(ctx, "rt000001")

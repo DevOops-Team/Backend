@@ -104,6 +104,15 @@ func (h *jobHandler) remove(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// stop ends a queued or running job (GPU-204). 202: the JobSets are gone, the end event follows.
+func (h *jobHandler) stop(c *gin.Context) {
+	if err := h.jobs.Stop(c.Request.Context(), c.Param("id")); err != nil {
+		fail(c, err)
+		return
+	}
+	c.Status(http.StatusAccepted)
+}
+
 func (h *jobHandler) events(c *gin.Context) {
 	events, err := h.jobs.Events(c.Request.Context(), c.Param("id"))
 	if err != nil {
