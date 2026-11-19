@@ -44,6 +44,11 @@ const (
 	// ClusterInfoConfigMap is the per-worker ConfigMap that tells ckpt-init · ckpt-sidecar which cluster
 	// they run on (the JobSet is copied unchanged to every worker, so env values cannot say it).
 	ClusterInfoConfigMap = "devoops-cluster-info"
+
+	// metricsPort: devoops_ckpt (Data trainer/) serves the training metrics on :8000 unless METRICS_PORT says
+	// otherwise (Monitoring docs/training-metrics.md). The worker's Prometheus Agent only scrapes pods that
+	// carry the prometheus.io annotations, so the pod template sets them (GPU-217).
+	metricsPort = 8000
 )
 
 // Input is everything that varies per job. Render has no side effects, so recovery can render
@@ -133,11 +138,18 @@ func Render(in Input) (*unstructured.Unstructured, error) {
 					"parallelism":    int64(in.GPUs),
 					"backoffLimit":   int64(0),
 					"template": map[string]any{
-						"metadata": map[string]any{"labels": map[string]any{
-							model.GPUGroupLabel:   model.GPUGroupValue,
-							model.JobIDLabel:      in.JobID,
-							model.GenerationLabel: generation,
-						}},
+						"metadata": map[string]any{
+							"labels": map[string]any{
+								model.GPUGroupLabel:   model.GPUGroupValue,
+								model.JobIDLabel:      in.JobID,
+								model.GenerationLabel: generation,
+							},
+							"annotations": map[string]any{
+								"prometheus.io/scrape": "true",
+								"prometheus.io/port":   strconv.Itoa(metricsPort),
+								"prometheus.io/path":   "/metrics",
+							},
+						},
 						"spec": renderPod(in, name, generation),
 					},
 				}},
