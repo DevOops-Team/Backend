@@ -170,20 +170,23 @@ func TestRenderSizesTheJobByGPUs(t *testing.T) {
 	}
 }
 
-func TestRenderRunsTrainPyFromTheTrainerImageAndKeepsStopExitCode(t *testing.T) {
+func TestRenderExecsTorchrunFromTheTrainerImage(t *testing.T) {
 	trainer := container(t, podSpec(t, doc(t, input(t)))["containers"], "trainer")
 	if trainer["image"] != "ghcr.io/devoops-team/trainer@sha256:t1" {
 		t.Errorf("image = %v", trainer["image"])
 	}
 	args := trainer["args"].([]any)[0].(string)
 	for _, want := range []string{
-		"torchrun --nnodes=2 --nproc-per-node=1 --node-rank=\"$JOB_COMPLETION_INDEX\"",
+		"exec torchrun --nnodes=2 --nproc-per-node=1 --node-rank=\"$JOB_COMPLETION_INDEX\"",
 		"--master-addr=job-3f9a1c2e-g0001-workers-0-0.job-3f9a1c2e-g0001", "--master-port=29500",
-		"/data/code/train.py", `if [ -f "$CKPT_DIR/STOP" ]; then exit 75; fi`,
+		"/data/code/train.py",
 	} {
 		if !strings.Contains(args, want) {
 			t.Errorf("args missing %q:\n%s", want, args)
 		}
+	}
+	if strings.Contains(args, "exit 75") || strings.Contains(args, "rc=$?") {
+		t.Errorf("torchrun must be exec'd (PID 1 gets SIGTERM), not followed by an exit-code wrapper:\n%s", args)
 	}
 	if strings.Contains(args, "pip install") || strings.Contains(args, "epochs") {
 		t.Errorf("no runtime installs, and hyperparameters belong in config.json:\n%s", args)

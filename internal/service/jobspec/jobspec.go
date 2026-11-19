@@ -44,10 +44,6 @@ const (
 	// ClusterInfoConfigMap is the per-worker ConfigMap that tells ckpt-init · ckpt-sidecar which cluster
 	// they run on (the JobSet is copied unchanged to every worker, so env values cannot say it).
 	ClusterInfoConfigMap = "devoops-cluster-info"
-
-	// stopExitCode: the sidecar wrote /ckpt/STOP (generation changed, approval refused). torchrun turns
-	// the worker's 75 into 1, so the entry script restores it (체크포인트 규약 · Data checkpoint/README).
-	stopExitCode = 75
 )
 
 // Input is everything that varies per job. Render has no side effects, so recovery can render
@@ -276,10 +272,12 @@ func trainer(in Input, name, generation string) map[string]any {
 	pod := in.Settings.Pod
 	master := fmt.Sprintf("%s-%s-0-0.%s", name, replicatedJobName, name)
 	script := fmt.Sprintf(`until getent hosts %s >/dev/null; do echo "waiting for %s"; sleep 2; done
-torchrun --nnodes=%d --nproc-per-node=1 --node-rank="$JOB_COMPLETION_INDEX" --master-addr=%s --master-port=%d --max-restarts=0 %s
-rc=$?
-if [ -f "$CKPT_DIR/STOP" ]; then exit %d; fi
-exit $rc`, master, master, in.GPUs, master, pod.MasterPort, trainEntry, stopExitCode)
+exec torchrun --nnodes=%d --nproc-per-node=1 --node-rank="$JOB_COMPLETION_INDEX" --master-addr=%s --master-port=%d --max-restarts=0 %s`,
+		master, master, in.GPUs, master, pod.MasterPort, trainEntry)
+	// exec: torchrun replaces the shell as PID 1 so the SIGTERM sent on JobSet deletion (user stop ·
+	// fencing) reaches torchrun and the workers. Without it sh (PID 1) ignored SIGTERM and training ran
+	// until the 60 s grace period's SIGKILL (GPU-229). The old STOP → exit 75 restore is gone: no
+	// component reads 75 (ADR-43).
 
 	return map[string]any{
 		"name":    "trainer",
