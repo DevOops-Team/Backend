@@ -278,6 +278,13 @@ func TestRenderSharesPodLocalVolumesAsUser1000(t *testing.T) {
 	}
 }
 
+func TestRenderAnnotatesPodsForMetricsScrape(t *testing.T) {
+	ann := at(t, doc(t, input(t)), "spec", "replicatedJobs", 0, "template", "spec", "template", "metadata", "annotations").(map[string]any)
+	if ann["prometheus.io/scrape"] != "true" || ann["prometheus.io/port"] != "8000" || ann["prometheus.io/path"] != "/metrics" {
+		t.Errorf("pod annotations = %v; the worker's Prometheus Agent scrapes :8000/metrics by these", ann)
+	}
+}
+
 func TestRenderPlacesPodsInOneZoneOnePerNode(t *testing.T) {
 	aff := podSpec(t, doc(t, input(t)))["affinity"].(map[string]any)
 	zone := at(t, aff, "podAffinity", "requiredDuringSchedulingIgnoredDuringExecution", 0).(map[string]any)
