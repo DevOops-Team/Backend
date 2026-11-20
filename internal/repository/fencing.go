@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -12,14 +14,16 @@ import (
 	"github.com/DevOops-Team/Backend/internal/model"
 )
 
-type itemPutter interface {
+type fencingDB interface {
 	PutItem(ctx context.Context, in *dynamodb.PutItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
+	UpdateItem(ctx context.Context, in *dynamodb.UpdateItemInput, opts ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
 }
 
-// Fencing creates a job's first item in the fencing table (ADR-6 · ADR-10). ckpt-init refuses to start
-// a pod whose job has no item (exit 6), and the trainer Pod role has no PutItem, so the backend writes it.
+// Fencing writes the backend's part of the fencing table (ADR-6 · ADR-10): a job's first item, and the
+// generation step of a user restart (GPU-240). ckpt-init refuses to start a pod whose job has no item
+// (exit 6) or another generation (exit 5), and the trainer Pod role cannot write either, so the backend does.
 type Fencing struct {
-	db    itemPutter
+	db    fencingDB
 	table string
 }
 
@@ -46,4 +50,68 @@ func (f *Fencing) Create(ctx context.Context, jobID string) error {
 		return fmt.Errorf("create fencing item: %w", err)
 	}
 	return nil
+}
+
+// Restart moves a stopped job from generation from to from+1 for a user restart (GPU-240), the way the
+// recovery controller does for a relocation but outside a recovery: only while no recovery is in progress
+// (recovery_phase absent or COMPLETED), and it removes the owner so the new generation's ckpt-init can claim
+// it. The approved checkpoint stays, so the new generation resumes from it. retry_count (automatic recovery
+// attempts) is left alone; restart_count counts user restarts.
+//
+// A repeated call after a successful step (the item is already at from+1, no recovery) returns nil, so a
+// restart whose JobSet submission failed can be retried. Any other mismatch is model.ErrGenerationMoved.
+func (f *Fencing) Restart(ctx context.Context, jobID string, from int, at time.Time) error {
+	to := from + 1
+	_, err := f.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(f.table),
+		Key:       map[string]types.AttributeValue{"job_id": &types.AttributeValueMemberS{Value: jobID}},
+		UpdateExpression: aws.String("SET generation = :to, restart_requested_at = :at, " +
+			"restart_count = if_not_exists(restart_count, :zero) + :one REMOVE #owner"),
+		ConditionExpression: aws.String("generation = :from AND " +
+			"(attribute_not_exists(recovery_phase) OR recovery_phase = :completed)"),
+		ExpressionAttributeNames: map[string]string{"#owner": "owner"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":from":      &types.AttributeValueMemberN{Value: strconv.Itoa(from)},
+			":to":        &types.AttributeValueMemberN{Value: strconv.Itoa(to)},
+			":at":        &types.AttributeValueMemberS{Value: at.UTC().Format(time.RFC3339)},
+			":zero":      &types.AttributeValueMemberN{Value: "0"},
+			":one":       &types.AttributeValueMemberN{Value: "1"},
+			":completed": &types.AttributeValueMemberS{Value: "COMPLETED"},
+		},
+		ReturnValuesOnConditionCheckFailure: types.ReturnValuesOnConditionCheckFailureAllOld,
+	})
+	var failed *types.ConditionalCheckFailedException
+	if !errors.As(err, &failed) {
+		if err != nil {
+			return fmt.Errorf("advance fencing generation: %w", err)
+		}
+		return nil
+	}
+	if failed.Item == nil {
+		return fmt.Errorf("fencing item %s: %w", jobID, model.ErrNotFound)
+	}
+	gen := numberOf(failed.Item["generation"])
+	phase := stringOf(failed.Item["recovery_phase"])
+	if gen == to && (phase == "" || phase == "COMPLETED") {
+		return nil // this restart already advanced it
+	}
+	return fmt.Errorf("fencing item %s is at generation %d (recovery_phase %q), not %d: %w",
+		jobID, gen, phase, from, model.ErrGenerationMoved)
+}
+
+func numberOf(v types.AttributeValue) int {
+	n, ok := v.(*types.AttributeValueMemberN)
+	if !ok {
+		return 0
+	}
+	i, _ := strconv.Atoi(n.Value)
+	return i
+}
+
+func stringOf(v types.AttributeValue) string {
+	s, ok := v.(*types.AttributeValueMemberS)
+	if !ok {
+		return ""
+	}
+	return s.Value
 }

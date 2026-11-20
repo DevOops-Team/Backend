@@ -220,6 +220,8 @@ func TestRenderAddsCkptInitWithConfigAndDataset(t *testing.T) {
 		"CONFIG_URI": "s3://ckpt-bucket/code/3f9a1c2e/config.json", "CONFIG_SHA256": "f7be89cf",
 		"DATASET_URI": "s3://ckpt-bucket/datasets/3f9a1c2e/v1/", "DATASET_MANIFEST_SHA256": "6b04",
 		"CHECKPOINT_FORMAT": "fsdp-dcp", "WORLD_SIZE": "2", "CODE_DIR": "/code", "DATA_DIR": "/data", "CKPT_DIR": "/ckpt",
+		// its own failure goes to job.lifecycle as job.init_failed (GPU-120)
+		"KAFKA_BOOTSTRAP": "172.30.0.40:9092", "KAFKA_TOPIC_LIFECYCLE": "job.lifecycle",
 	} {
 		if got[k] != want {
 			t.Errorf("ckpt-init env %s = %q, want %q", k, got[k], want)
@@ -246,6 +248,33 @@ func TestRenderAddsCkptSidecarThatReportsToKafka(t *testing.T) {
 		if got[k] != want {
 			t.Errorf("ckpt-sidecar env %s = %q, want %q", k, got[k], want)
 		}
+	}
+}
+
+func TestRenderGivesBothAgentsTheNodeName(t *testing.T) {
+	spec := podSpec(t, doc(t, input(t)))
+	for _, name := range []string{"ckpt-init", "ckpt-sidecar"} {
+		if got := envOf(container(t, spec["initContainers"], name))["NODE_NAME"]; !strings.Contains(got, "spec.nodeName") {
+			t.Errorf("%s NODE_NAME = %q, want the spec.nodeName fieldRef", name, got)
+		}
+	}
+}
+
+func TestRenderRestartsAHungSidecarByItsAliveFile(t *testing.T) {
+	sc := container(t, podSpec(t, doc(t, input(t)))["initContainers"], "ckpt-sidecar")
+	probe, ok := sc["livenessProbe"].(map[string]any)
+	if !ok {
+		t.Fatalf("ckpt-sidecar has no livenessProbe: %v", sc)
+	}
+	cmd := strings.Join(toStrings(at(t, probe, "exec", "command")), " ")
+	if cmd != "sh -c test $(( $(date +%s) - $(stat -c %Y /tmp/sidecar-alive) )) -lt 300" {
+		t.Errorf("probe command = %q", cmd)
+	}
+	if probe["initialDelaySeconds"] != float64(60) || probe["periodSeconds"] != float64(30) || probe["failureThreshold"] != float64(2) {
+		t.Errorf("probe timing = %v", probe)
+	}
+	if tr := container(t, podSpec(t, doc(t, input(t)))["containers"], "trainer"); tr["livenessProbe"] != nil {
+		t.Error("the trainer must not get a liveness probe")
 	}
 }
 

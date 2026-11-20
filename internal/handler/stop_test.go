@@ -36,3 +36,30 @@ func TestStopJobRoute(t *testing.T) {
 		t.Errorf("POST stop while recovering = %d %s", rec.Code, rec.Body)
 	}
 }
+
+type fakeRestart struct {
+	JobService
+	err error
+	got *string
+}
+
+func (f fakeRestart) Restart(_ context.Context, id string) error {
+	*f.got = id
+	return f.err
+}
+
+func TestRestartJobRoute(t *testing.T) {
+	post := func(jobs JobService) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		newRouter(jobs).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/jobs/0cb3b0c3/restart", nil))
+		return rec
+	}
+	var got string
+	if rec := post(fakeRestart{got: &got}); rec.Code != http.StatusAccepted || got != "0cb3b0c3" {
+		t.Errorf("POST restart = %d for %q", rec.Code, got)
+	}
+	rec := post(fakeRestart{got: &got, err: &service.Error{Kind: service.KindConflict, Code: "NOT_STOPPED", Msg: "running"}})
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "NOT_STOPPED") {
+		t.Errorf("POST restart of a running job = %d %s", rec.Code, rec.Body)
+	}
+}
