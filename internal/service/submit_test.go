@@ -37,7 +37,8 @@ func (s *submitted) Stop(context.Context, string, time.Time) ([]string, error) {
 
 type noFencing struct{}
 
-func (noFencing) Create(context.Context, string) error { return nil }
+func (noFencing) Create(context.Context, string) error                  { return nil }
+func (noFencing) Restart(context.Context, string, int, time.Time) error { return nil }
 
 type noLifecycle struct{}
 

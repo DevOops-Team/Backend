@@ -49,6 +49,10 @@ const (
 	// otherwise (Monitoring docs/training-metrics.md). The worker's Prometheus Agent only scrapes pods that
 	// carry the prometheus.io annotations, so the pod template sets them (GPU-217).
 	metricsPort = 8000
+
+	// The ckpt-sidecar touches this file every loop (Data checkpoint/ckpt/sidecar.py ALIVE_FILE, ADR-44).
+	sidecarAliveFile    = "/tmp/sidecar-alive"
+	sidecarAliveSeconds = 300
 )
 
 // Input is everything that varies per job. Render has no side effects, so recovery can render
@@ -233,6 +237,11 @@ func ckptInit(in Input, generation string) map[string]any {
 		env("DATASET_MANIFEST_SHA256", in.DatasetManifestSHA256),
 		env("CODE_DIR", codeDir),
 		env("DATA_DIR", dataDir),
+		// ckpt-init reports its own failure as job.init_failed on job.lifecycle (Data #33, GPU-120 · ADR-43).
+		// It reads no S3 outbox, and a failed publish does not change its exit code.
+		env("KAFKA_BOOTSTRAP", in.KafkaBootstrap),
+		env("KAFKA_TOPIC_LIFECYCLE", in.KafkaTopic),
+		nodeName(),
 	)
 	return map[string]any{
 		"name":    "ckpt-init",
@@ -259,16 +268,24 @@ func ckptSidecar(in Input, generation string) map[string]any {
 		env("IMAGE_DIGEST", imageDigest(in.Settings.Images.Trainer)),
 		// S3 outbox for undelivered events needs events-outbox/* write, which the trainer role lacks.
 		env("OUTBOX_PREFIX", ""),
-		map[string]any{
-			"name":      "NODE_NAME",
-			"valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "spec.nodeName"}},
-		},
+		nodeName(),
 	)
 	return map[string]any{
 		"name":          "ckpt-sidecar",
 		"image":         in.Settings.Images.Checkpoint, // 같은 이미지, 기본 CMD = 사이드카
 		"restartPolicy": "Always",                      // 네이티브 사이드카
 		"env":           e,
+		// A sidecar that hangs alive is restarted on its own (ADR-44, GPU-213): it touches sidecarAliveFile on
+		// every loop (checkpoint image 1.4.0+), and 300 s is well over the longest S3 upload in one loop. The
+		// upload · approval state lives in /ckpt markers, so the restarted sidecar picks up where it was; the
+		// trainer is not touched.
+		"livenessProbe": map[string]any{
+			"exec": map[string]any{"command": []any{"sh", "-c",
+				fmt.Sprintf("test $(( $(date +%%s) - $(stat -c %%Y %s) )) -lt %d", sidecarAliveFile, sidecarAliveSeconds)}},
+			"initialDelaySeconds": int64(60),
+			"periodSeconds":       int64(30),
+			"failureThreshold":    int64(2),
+		},
 		"volumeMounts": []any{
 			mount("ckpt", ckptDir, false),
 			mount(progressVolume, progressDir, true),
@@ -333,6 +350,14 @@ func imageDigest(image string) string {
 		return d
 	}
 	return ""
+}
+
+// nodeName is the node the pod runs on, for the events ckpt-init · ckpt-sidecar send.
+func nodeName() map[string]any {
+	return map[string]any{
+		"name":      "NODE_NAME",
+		"valueFrom": map[string]any{"fieldRef": map[string]any{"fieldPath": "spec.nodeName"}},
+	}
 }
 
 func required(term map[string]any) map[string]any {

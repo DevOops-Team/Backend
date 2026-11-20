@@ -68,9 +68,13 @@ type JobRecords interface {
 	Gone(ctx context.Context, ids []string) ([]model.StatusRow, error)
 }
 
-// Fencing creates the job's first fencing item (DynamoDB); model.ErrAlreadyExists if it exists.
+// Fencing writes the backend's part of the fencing table (DynamoDB).
 type Fencing interface {
+	// Create writes the job's first item; model.ErrAlreadyExists if it exists.
 	Create(ctx context.Context, jobID string) error
+	// Restart moves a stopped job from generation from to from+1 for a user restart (GPU-240); nil when it is
+	// already there, model.ErrGenerationMoved when the item is elsewhere or a recovery owns it.
+	Restart(ctx context.Context, jobID string, from int, at time.Time) error
 }
 
 // Lifecycle reports the backend's job events to Kafka job.lifecycle.
