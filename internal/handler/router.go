@@ -25,6 +25,7 @@ type JobService interface {
 	ModelFileURL(ctx context.Context, id, name string) (string, error)
 	Delete(ctx context.Context, id string) error
 	Stop(ctx context.Context, id string) error
+	Restart(ctx context.Context, id string) error
 }
 
 // NewRouter wires middleware and routes. The API routes must match api/openapi.yaml
@@ -44,6 +45,7 @@ func NewRouter(jobs JobService, allowedOrigin string) *gin.Engine {
 	r.GET("/api/jobs/:id", h.get)
 	r.DELETE("/api/jobs/:id", h.remove)
 	r.POST("/api/jobs/:id/stop", h.stop)
+	r.POST("/api/jobs/:id/restart", h.restart)
 	r.GET("/api/jobs/:id/events", h.events)
 	r.GET("/api/jobs/:id/files", h.files)
 	r.GET("/api/jobs/:id/files/:kind/:name", h.file)

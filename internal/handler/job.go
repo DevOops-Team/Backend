@@ -113,6 +113,16 @@ func (h *jobHandler) stop(c *gin.Context) {
 	c.Status(http.StatusAccepted)
 }
 
+// restart runs a stopped job again from its last approved checkpoint (GPU-240). 202: the next generation
+// is submitted, its job.submitted · job.resumed follow.
+func (h *jobHandler) restart(c *gin.Context) {
+	if err := h.jobs.Restart(c.Request.Context(), c.Param("id")); err != nil {
+		fail(c, err)
+		return
+	}
+	c.Status(http.StatusAccepted)
+}
+
 func (h *jobHandler) events(c *gin.Context) {
 	events, err := h.jobs.Events(c.Request.Context(), c.Param("id"))
 	if err != nil {
