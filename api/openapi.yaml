@@ -396,7 +396,7 @@ components:
 
     TrainingOptions:
       type: object
-      required: [strategies, defaultStrategy, gpus, datasetFormat, hyperparameters, limits, checkpoint]
+      required: [strategies, defaultStrategy, finetunes, defaultFinetune, gpus, datasetFormat, hyperparameters, limits, checkpoint]
       properties:
         strategies:
           type: array
@@ -408,6 +408,17 @@ components:
               minGpus: { type: integer, example: 1 }
               checkpointFormat: { type: string, example: fsdp-dcp }
         defaultStrategy: { type: string, example: fsdp }
+        finetunes:
+          type: array
+          description: "학습 방식 (GPU-262). full = 모든 파라미터, qlora = 4bit 기본 가중치 + LoRA 어댑터만. strategies에 든 방식에서만 고를 수 있다"
+          items:
+            type: object
+            required: [name, strategies]
+            properties:
+              name: { type: string, enum: [full, qlora] }
+              strategies: { type: array, items: { type: string }, example: [fsdp] }
+              lora: { $ref: "#/components/schemas/Lora" }
+        defaultFinetune: { type: string, example: full }
         gpus: { $ref: "#/components/schemas/GPURange" }
         datasetFormat: { type: string, example: text-jsonl }
         hyperparameters:
@@ -434,10 +445,13 @@ components:
             maxFiles: { type: integer }
         checkpoint:
           type: object
-          description: "간격 미리보기용. τ = √(2·C·M), C = 모델 바이트 · sizeFactor / writeBytesPerSecond, 최소 minIntervalSeconds"
-          required: [sizeFactor, writeBytesPerSecond, mtbfSeconds, minIntervalSeconds]
+          description: >-
+            간격 계산 입력 (GPU-261). τ = √(2·C·M), C = 저장 파라미터 수 · bytesPerParam ÷ 쓰는 Pod 수 ÷ writeBytesPerSecond, 최소 minIntervalSeconds.
+            저장 파라미터 수는 full이면 모델 전체, qlora면 LoRA 어댑터(Σ r·(in+out))이고 Backend가 safetensors 헤더의 텐서 모양으로 센다.
+            쓰는 Pod 수는 FSDP면 GPU 수, DDP면 1
+          required: [bytesPerParam, writeBytesPerSecond, mtbfSeconds, minIntervalSeconds]
           properties:
-            sizeFactor: { type: number, example: 3 }
+            bytesPerParam: { type: number, example: 12, description: "fp32 가중치 4 + Adam 모멘트 8" }
             writeBytesPerSecond: { type: number, example: 100000000 }
             mtbfSeconds: { type: number, example: 21600 }
             minIntervalSeconds: { type: number, example: 300 }
@@ -449,6 +463,13 @@ components:
       properties:
         name: { type: string, description: "1~63자, 소문자 · 숫자 · `-`. 없으면 `{모델 폴더명}-{id}`", example: gpt2-demo }
         strategy: { type: string, description: 없으면 defaultStrategy, example: fsdp }
+        finetune:
+          type: string
+          enum: [full, qlora]
+          description: >-
+            학습 방식 (GPU-262). 없으면 defaultFinetune. qlora는 FSDP에서만, 모델 폴더에 safetensors가 있어야 한다(어댑터 크기 계산).
+            train.py가 config.json `finetune`을 읽어야 하며 기본 train.py(`fit()`)는 full만 한다
+          example: qlora
         gpus: { type: integer, example: 2 }
         hyperparameters:
           type: object
@@ -475,9 +496,9 @@ components:
     TrainConfig:
       type: object
       description: 최종 config.json. 키는 snake_case 그대로다.
-      required: [schema_version, model, training_mode, checkpoint_format, dataset, epochs, max_steps, batch_size_per_gpu, learning_rate, warmup_steps, seed, world_size, checkpoint_policy]
+      required: [schema_version, model, training_mode, checkpoint_format, dataset, epochs, max_steps, batch_size_per_gpu, learning_rate, warmup_steps, seed, world_size, checkpoint_policy, finetune]
       properties:
-        schema_version: { type: integer, example: 2 }
+        schema_version: { type: integer, example: 3, description: "3: finetune 추가 (GPU-262). trainer 하네스는 2 · 3을 모두 받는다" }
         model: { type: string, example: gpt2 }
         training_mode: { type: string, example: fsdp }
         checkpoint_format: { type: string, example: fsdp-dcp }
@@ -500,10 +521,32 @@ components:
           description: "Young/Daly 간격. train.py가 처음 warmup_measure_steps step의 시간을 재서 step 간격으로 바꾼다"
           required: [interval_seconds, estimated_save_seconds, mtbf_seconds, warmup_measure_steps]
           properties:
-            interval_seconds: { type: number, example: 844 }
-            estimated_save_seconds: { type: number, example: 16.5 }
+            interval_seconds: { type: number, example: 590 }
+            estimated_save_seconds: { type: number, example: 8.1 }
             mtbf_seconds: { type: number, example: 21600 }
             warmup_measure_steps: { type: integer, example: 20 }
+        finetune:
+          type: object
+          required: [method, lora]
+          properties:
+            method: { type: string, enum: [full, qlora] }
+            lora:
+              allOf: [{ $ref: "#/components/schemas/Lora" }]
+              nullable: true
+              description: full이면 null
+
+    Lora:
+      type: object
+      description: LoRA 어댑터 설정 (peft LoraConfig). Backend 설정 finetune_methods.qlora.lora
+      required: [r, alpha, dropout, target_modules]
+      properties:
+        r: { type: integer, example: 16 }
+        alpha: { type: integer, example: 32 }
+        dropout: { type: number, example: 0.05 }
+        target_modules:
+          type: array
+          items: { type: string }
+          example: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 
     CreatedJob:
       type: object
@@ -550,6 +593,7 @@ components:
         name: { type: string }
         model: { type: string }
         strategy: { type: string }
+        finetune: { type: string, enum: [full, qlora], description: "학습 방식 (GPU-262). 그 전에 제출한 작업은 생략 = full" }
         gpus: { type: integer }
         status: { $ref: "#/components/schemas/Status" }
         statusMessage: { type: string, description: "대기 이유 등 Kueue 메시지, 실패 · 재배치 이유" }

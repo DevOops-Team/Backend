@@ -16,6 +16,7 @@ func JobStatusFromMeta(id, jobsetName string, labels, ann map[string]string) Job
 		Name:         jobsetName,
 		Model:        ann[ModelAnnotation],
 		Strategy:     ann[StrategyAnnotation],
+		Finetune:     ann[FinetuneAnnotation],
 		Generation:   atoi(labels[GenerationLabel]),
 		GPUs:         atoi(ann[WorldSizeAnnotation]),
 		JobsetName:   jobsetName,

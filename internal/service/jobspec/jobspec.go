@@ -63,6 +63,7 @@ type Input struct {
 	Name                  string
 	Model                 string
 	Strategy              string
+	Finetune              string // full · qlora (GPU-262), annotation only: train.py reads config.json
 	GPUs                  int
 	DatasetID             string
 	DatasetVersion        int
@@ -109,6 +110,7 @@ func Render(in Input) (*unstructured.Unstructured, error) {
 	}
 	annotations := map[string]any{
 		model.StrategyAnnotation:        in.Strategy,
+		model.FinetuneAnnotation:        in.Finetune,
 		model.WorldSizeAnnotation:       strconv.Itoa(in.GPUs),
 		model.ModelAnnotation:           in.Model,
 		model.DatasetAnnotation:         fmt.Sprintf("%s/v%d", in.DatasetID, in.DatasetVersion),
