@@ -30,7 +30,8 @@ Frontend ◀── 폴링 ── Backend ◀── 데이터 DB v_job_status (ba
 
 ## 체크포인트 간격
 
-- Backend: `C = 모델 폴더 바이트 × size_factor ÷ write_bytes_per_second`, `τ = max(min_interval_seconds, √(2·C·mtbf_seconds))` → config.json `checkpoint_policy`
+- Backend: `C = 저장 파라미터 수 × bytes_per_param(12) ÷ 쓰는 Pod 수 ÷ write_bytes_per_second`, `τ = max(min_interval_seconds, √(2·C·mtbf_seconds))` → config.json `checkpoint_policy` (GPU-261). 저장 파라미터 수는 full = 모델 전체, qlora = LoRA 어댑터 Σ r·(in+out)이고 모델 safetensors 헤더의 텐서 모양으로 센다(헤더만 읽음). 쓰는 Pod 수는 FSDP = GPU 수, DDP = 1
+- 학습 방식 (GPU-262): spec `finetune` = `full`(기본) · `qlora`(FSDP만) → config.json schema 3 `finetune {method, lora}`. LoRA 값은 설정 `finetune_methods.qlora.lora`. trainer 이미지(하네스)가 schema 3을 받는 버전이어야 한다
 - train.py: 처음 `warmup_measure_steps` step의 시간으로 예상 학습 시간 T를 구해 저장 횟수 n = ⌊T/τ⌋, step 간격 ⌈전체 step/n⌉ (마지막 step은 항상 저장)
 - 기본값은 `internal/settings/default.json` `checkpoint`(M = 6시간). 검증 때 짧게 보려면 `BACKEND_SETTINGS`로 M · 하한을 낮춘다
 

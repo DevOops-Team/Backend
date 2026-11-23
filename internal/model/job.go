@@ -80,6 +80,7 @@ type JobStatus struct {
 	Name            string         `json:"name"`
 	Model           string         `json:"model"`
 	Strategy        string         `json:"strategy"`
+	Finetune        string         `json:"finetune,omitempty"` // full · qlora (GPU-262); "" = before GPU-262 = full
 	GPUs            int            `json:"gpus"`
 	Status          Status         `json:"status"`
 	Message         string         `json:"statusMessage,omitempty"` // e.g. why it is still waiting
@@ -203,8 +204,11 @@ type Job struct {
 // training data follow as file parts. Omitted strategy and name get defaults; omitted
 // hyperparameters keep the training defaults.
 type SubmitSpec struct {
-	Name            string         `json:"name"`
-	Strategy        string         `json:"strategy"`
+	Name     string `json:"name"`
+	Strategy string `json:"strategy"`
+	// Finetune is the training method (GPU-262): "full" (every parameter) or "qlora" (LoRA adapter on
+	// 4-bit base weights, FSDP only). Omitted = training.default_finetune.
+	Finetune        string         `json:"finetune,omitempty"`
 	GPUs            int            `json:"gpus"`
 	Hyperparameters map[string]any `json:"hyperparameters"`
 	// ExpID is the experiment the job belongs to (잡 투입기, GPU-172). Optional; it goes to job.submitted
@@ -239,6 +243,20 @@ type TrainConfig struct {
 	Seed             int64            `json:"seed"`
 	WorldSize        int              `json:"world_size"`
 	CheckpointPolicy CheckpointPolicy `json:"checkpoint_policy"`
+	Finetune         ConfigFinetune   `json:"finetune"` // schema 3 (GPU-262)
+}
+
+// ConfigFinetune is config.json finetune: the training method and, for qlora, the LoRA adapter.
+type ConfigFinetune struct {
+	Method string      `json:"method"`
+	Lora   *ConfigLora `json:"lora"` // null for full
+}
+
+type ConfigLora struct {
+	R             int      `json:"r"`
+	Alpha         int      `json:"alpha"`
+	Dropout       float64  `json:"dropout"`
+	TargetModules []string `json:"target_modules"`
 }
 
 type ConfigDataset struct {

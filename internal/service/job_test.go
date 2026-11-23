@@ -61,7 +61,7 @@ func TestDefaultGPUOptionsCanBeSubmittedForBothStrategies(t *testing.T) {
 	options := s.Options()
 	for _, strategy := range options.Strategies {
 		for _, count := range []int{1, 2, 4} {
-			if _, _, err := s.validate(model.SubmitSpec{Strategy: strategy.Name, GPUs: count}); err != nil {
+			if _, _, _, err := s.validate(model.SubmitSpec{Strategy: strategy.Name, GPUs: count}); err != nil {
 				t.Errorf("validate strategy %s with %d GPUs: %v", strategy.Name, count, err)
 			}
 		}

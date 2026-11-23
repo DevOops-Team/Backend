@@ -5,6 +5,8 @@ package model
 type TrainingOptions struct {
 	Strategies      []StrategyOption    `json:"strategies"`
 	DefaultStrategy string              `json:"defaultStrategy"`
+	Finetunes       []FinetuneOption    `json:"finetunes"`
+	DefaultFinetune string              `json:"defaultFinetune"`
 	GPUs            GPURange            `json:"gpus"`
 	DatasetFormat   string              `json:"datasetFormat"`
 	Hyperparameters []HyperparameterDef `json:"hyperparameters"`
@@ -16,6 +18,13 @@ type StrategyOption struct {
 	Name             string `json:"name"`
 	MinGPUs          int    `json:"minGpus"`
 	CheckpointFormat string `json:"checkpointFormat"`
+}
+
+// FinetuneOption is a training method (GPU-262) and the strategies it runs with.
+type FinetuneOption struct {
+	Name       string      `json:"name"`
+	Strategies []string    `json:"strategies"`
+	Lora       *ConfigLora `json:"lora,omitempty"`
 }
 
 type GPURange struct {
@@ -43,10 +52,11 @@ type UploadLimits struct {
 	MaxFiles      int   `json:"maxFiles"`
 }
 
-// CheckpointDefaults lets the screen preview the interval: τ = √(2 · C · M), C = model bytes ·
-// sizeFactor / writeBytesPerSecond, at least minIntervalSeconds.
+// CheckpointDefaults lets the screen preview the interval: τ = √(2 · C · M), C = saved parameters ·
+// bytesPerParam ÷ GPUs ÷ writeBytesPerSecond, at least minIntervalSeconds. Saved parameters are every
+// parameter for full and the LoRA adapter for qlora (GPU-261).
 type CheckpointDefaults struct {
-	SizeFactor          float64 `json:"sizeFactor"`
+	BytesPerParam       float64 `json:"bytesPerParam"`
 	WriteBytesPerSecond float64 `json:"writeBytesPerSecond"`
 	MTBFSeconds         float64 `json:"mtbfSeconds"`
 	MinIntervalSeconds  float64 `json:"minIntervalSeconds"`

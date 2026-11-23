@@ -112,7 +112,7 @@ const (
 	maxMetadataBytes = 4 << 20 // config files and manifests are small
 	firstGeneration  = 1       // 복구 재제출은 재배치 실행기가 jobset.json으로 한다
 	datasetVersion   = 1       // 업로드는 제출마다 새 데이터셋: datasets/<job id>/v1
-	configSchema     = 2       // 2: checkpoint_policy replaces checkpoint_every_steps; model · data in the dataset
+	configSchema     = 3       // 3: finetune (full · qlora, GPU-262); 2: checkpoint_policy replaces checkpoint_every_steps
 	manifestSchema   = 1
 	manifestName     = "manifest.json"
 	modelConfigName  = "model/config.json" // every Hugging Face model folder has it
@@ -190,6 +190,12 @@ func (s *JobService) Options() model.TrainingOptions {
 		"epochs": tr.Defaults.Epochs, "max_steps": tr.Defaults.MaxSteps, "batch_size_per_gpu": tr.Defaults.BatchSizePerGPU,
 		"learning_rate": tr.Defaults.LearningRate, "warmup_steps": tr.Defaults.WarmupSteps, "seed": tr.Defaults.Seed,
 	}
+	finetunes := make([]model.FinetuneOption, 0, len(st.FinetuneMethods))
+	for _, n := range settings.FinetuneNames {
+		if m, ok := st.FinetuneMethods[n]; ok {
+			finetunes = append(finetunes, model.FinetuneOption{Name: n, Strategies: m.Strategies, Lora: configLora(m.Lora)})
+		}
+	}
 	hyper := make([]model.HyperparameterDef, 0, len(tr.Hyperparameters))
 	for _, h := range tr.Hyperparameters {
 		hyper = append(hyper, model.HyperparameterDef{Key: h.Key, Level: h.Level, Type: h.Type, Nullable: h.Nullable,
@@ -198,12 +204,14 @@ func (s *JobService) Options() model.TrainingOptions {
 	return model.TrainingOptions{
 		Strategies:      strategies,
 		DefaultStrategy: tr.DefaultStrategy,
+		Finetunes:       finetunes,
+		DefaultFinetune: tr.DefaultFinetune,
 		GPUs:            model.GPURange(tr.GPUs),
 		DatasetFormat:   tr.DatasetFormat,
 		Hyperparameters: hyper,
 		Limits: model.UploadLimits{MaxModelBytes: st.Limits.MaxModelBytes, MaxDataBytes: st.Limits.MaxDataBytes,
 			MaxTrainBytes: MaxTrainBytes, MaxFiles: st.Limits.MaxFiles},
-		Checkpoint: model.CheckpointDefaults{SizeFactor: st.Checkpoint.SizeFactor, WriteBytesPerSecond: st.Checkpoint.WriteBytesPerSecond,
+		Checkpoint: model.CheckpointDefaults{BytesPerParam: st.Checkpoint.BytesPerParam, WriteBytesPerSecond: st.Checkpoint.WriteBytesPerSecond,
 			MTBFSeconds: st.Checkpoint.MTBFSeconds, MinIntervalSeconds: st.Checkpoint.MinIntervalSeconds},
 	}
 }
@@ -213,10 +221,11 @@ func (s *JobService) Options() model.TrainingOptions {
 // job.submitted. The spec is checked before any upload, so a rejected request writes nothing; a
 // failure later leaves the uploaded objects (the backend may not delete) but never submits a JobSet.
 func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src UploadSource) (model.CreatedJob, error) {
-	strategy, merged, err := s.validate(spec)
+	strategy, finetune, merged, err := s.validate(spec)
 	if err != nil {
 		return model.CreatedJob{}, err
 	}
+	method := s.cfg.Settings.FinetuneMethods[finetune]
 	queue, err := s.cfg.Settings.QueueFor(spec.GPUs)
 	if err != nil {
 		return model.CreatedJob{}, invalidFields([]model.FieldError{{Field: "gpus", Message: err.Error()}})
@@ -229,6 +238,10 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 	} else {
 		ds, err = s.uploadDataset(ctx, id, src)
 	}
+	if err != nil {
+		return model.CreatedJob{}, err
+	}
+	saved, err := s.savedParams(ctx, ds, finetune, method.Lora)
 	if err != nil {
 		return model.CreatedJob{}, err
 	}
@@ -255,7 +268,8 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 		WarmupSteps:      merged.WarmupSteps,
 		Seed:             merged.Seed,
 		WorldSize:        spec.GPUs,
-		CheckpointPolicy: ckptpolicy.Compute(ds.modelBytes, s.cfg.Settings.Checkpoint),
+		CheckpointPolicy: ckptpolicy.Compute(saved, ckptpolicy.Writers(strategy, spec.GPUs), s.cfg.Settings.Checkpoint),
+		Finetune:         model.ConfigFinetune{Method: finetune, Lora: configLora(method.Lora)},
 	}, "", "  ")
 	if err != nil {
 		return model.CreatedJob{}, fmt.Errorf("encode config: %w", err)
@@ -263,7 +277,7 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 	configSHA := sha256Hex(configBytes)
 
 	js, err := jobspec.Render(jobspec.Input{
-		JobID: id, Generation: firstGeneration, Name: name, Model: ds.modelName, Strategy: strategy, GPUs: spec.GPUs,
+		JobID: id, Generation: firstGeneration, Name: name, Model: ds.modelName, Strategy: strategy, Finetune: finetune, GPUs: spec.GPUs,
 		DatasetID: ds.id, DatasetVersion: ds.version, DatasetManifestSHA256: ds.manifestSHA, ConfigSHA256: configSHA,
 		CheckpointFormat: checkpointFormat, Hyperparameters: spec.Hyperparameters, ExpID: spec.ExpID, Queue: queue,
 		Namespace: s.cfg.Namespace, Region: s.cfg.Region, Bucket: s.cfg.Bucket, FencingTable: s.cfg.FencingTable,
@@ -309,7 +323,8 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 	})
 
 	slog.Info("job submitted", "id", id, "name", js.GetName(), "model", ds.modelName, "strategy", strategy,
-		"gpus", spec.GPUs, "dataset", ds.prefix, "modelBytes", ds.modelBytes, "dataBytes", ds.dataBytes)
+		"finetune", finetune, "gpus", spec.GPUs, "dataset", ds.prefix, "modelBytes", ds.modelBytes,
+		"dataBytes", ds.dataBytes, "checkpointParams", saved)
 	return model.CreatedJob{
 		ID: id, Name: name, Status: model.StatusQueued, Generation: firstGeneration, JobsetName: js.GetName(),
 		Queue: queue, Config: configBytes, ConfigSHA256: configSHA, CreatedAt: now,
@@ -323,8 +338,19 @@ type datasetInput struct {
 	prefix                string // datasets/<id>/v<version>/
 	modelName             string
 	modelBytes, dataBytes int64
-	train                 []byte // code/train.py, copied to code/<job id>/ for the file viewer
+	modelFiles            []string // model/… file names, to read the safetensors headers (GPU-261)
+	train                 []byte   // code/train.py, copied to code/<job id>/ for the file viewer
 	manifestSHA           string
+}
+
+func modelFiles(entries []model.ManifestEntry) []string {
+	var names []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name, "model/") {
+			names = append(names, e.Name)
+		}
+	}
+	return names
 }
 
 // uploadDataset stores the file parts as the job's own dataset, datasets/<job id>/v1/, with its manifest.
@@ -347,7 +373,8 @@ func (s *JobService) uploadDataset(ctx context.Context, id string, src UploadSou
 		return datasetInput{}, upstream("upload "+manifestName, err)
 	}
 	return datasetInput{id: id, version: datasetVersion, prefix: prefix, modelName: up.modelName,
-		modelBytes: up.modelBytes, dataBytes: up.dataBytes, train: up.train, manifestSHA: sha256Hex(manifestBytes)}, nil
+		modelBytes: up.modelBytes, dataBytes: up.dataBytes, modelFiles: modelFiles(up.entries), train: up.train,
+		manifestSHA: sha256Hex(manifestBytes)}, nil
 }
 
 // fixedDataset uses a dataset put in S3 once (GPU-200) instead of an upload: nothing is uploaded or
@@ -397,7 +424,8 @@ func (s *JobService) fixedDataset(ctx context.Context, ref model.SpecDataset, sr
 		return datasetInput{}, bad("code/train.py가 manifest와 다릅니다")
 	}
 	return datasetInput{id: ref.ID, version: ref.Version, prefix: prefix, modelName: m.Model,
-		modelBytes: m.ModelBytes, dataBytes: m.DataBytes, train: train, manifestSHA: sha256Hex(raw)}, nil
+		modelBytes: m.ModelBytes, dataBytes: m.DataBytes, modelFiles: modelFiles(m.Files), train: train,
+		manifestSHA: sha256Hex(raw)}, nil
 }
 
 // received is what the file parts of one submission turned into.
@@ -560,8 +588,8 @@ func defaultName(modelName, id string) string {
 	return base + "-" + id
 }
 
-// validate checks the spec (no I/O) and returns the strategy and the merged training values.
-func (s *JobService) validate(spec model.SubmitSpec) (string, settings.Defaults, error) {
+// validate checks the spec (no I/O) and returns the strategy, the training method and the merged training values.
+func (s *JobService) validate(spec model.SubmitSpec) (string, string, settings.Defaults, error) {
 	var fields []model.FieldError
 	bad := func(field, msg string) { fields = append(fields, model.FieldError{Field: field, Message: msg}) }
 	tr := s.cfg.Settings.Training
@@ -584,6 +612,21 @@ func (s *JobService) validate(spec model.SubmitSpec) (string, settings.Defaults,
 	} else if msg := gpuProblem(tr.GPUs, st, strategy, spec.GPUs); msg != "" {
 		bad("gpus", msg)
 	}
+	finetune := spec.Finetune
+	if finetune == "" {
+		finetune = tr.DefaultFinetune
+	}
+	if m, ok := s.cfg.Settings.FinetuneMethods[finetune]; !ok {
+		names := make([]string, 0, len(s.cfg.Settings.FinetuneMethods))
+		for _, n := range settings.FinetuneNames {
+			if _, ok := s.cfg.Settings.FinetuneMethods[n]; ok {
+				names = append(names, n)
+			}
+		}
+		bad("finetune", "지원 학습 방식: "+strings.Join(names, ", "))
+	} else if ok && !slices.Contains(m.Strategies, strategy) {
+		bad("finetune", fmt.Sprintf("%s는 %s에서만 쓸 수 있습니다", finetuneLabel(finetune), strings.ToUpper(strings.Join(m.Strategies, " · "))))
+	}
 	merged, hfields := mergeHyperparameters(tr, spec.Hyperparameters)
 	fields = append(fields, hfields...)
 	if d := spec.Dataset; d != nil {
@@ -595,9 +638,23 @@ func (s *JobService) validate(spec model.SubmitSpec) (string, settings.Defaults,
 		}
 	}
 	if len(fields) > 0 {
-		return "", settings.Defaults{}, invalidFields(fields)
+		return "", "", settings.Defaults{}, invalidFields(fields)
 	}
-	return strategy, merged, nil
+	return strategy, finetune, merged, nil
+}
+
+func finetuneLabel(name string) string {
+	if name == "qlora" {
+		return "QLoRA"
+	}
+	return strings.ToUpper(name)
+}
+
+func configLora(l *settings.Lora) *model.ConfigLora {
+	if l == nil {
+		return nil
+	}
+	return &model.ConfigLora{R: l.R, Alpha: l.Alpha, Dropout: l.Dropout, TargetModules: slices.Clone(l.TargetModules)}
 }
 
 // gpuProblem says why this GPU count cannot run, or "" when it can.
