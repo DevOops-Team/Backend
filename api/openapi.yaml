@@ -531,6 +531,7 @@ components:
           properties:
             method: { type: string, enum: [full, qlora] }
             lora:
+              type: object
               allOf: [{ $ref: "#/components/schemas/Lora" }]
               nullable: true
               description: full이면 null
