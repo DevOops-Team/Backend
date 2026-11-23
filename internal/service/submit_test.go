@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -219,5 +221,111 @@ func TestSubmitWithUploadStillStoresItAsTheJobsOwnDataset(t *testing.T) {
 	}
 	if js, _ := json.Marshal(sched.js.Object); !strings.Contains(string(js), `"a1b2c3d4/v1"`) {
 		t.Error("JobSet dataset annotation is not the job's own upload")
+	}
+}
+
+// safetensorsFile is a model file with only a header: the backend never reads past it (GPU-261).
+func safetensorsFile(t *testing.T, shapes map[string][]int64) string {
+	tensors := map[string]any{"__metadata__": map[string]string{"format": "pt"}}
+	for name, shape := range shapes {
+		tensors[name] = map[string]any{"dtype": "BF16", "shape": shape, "data_offsets": []int{0, 0}}
+	}
+	header, err := json.Marshal(tensors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(binary.LittleEndian.AppendUint64(nil, uint64(len(header)))) + string(header) + "weights…"
+}
+
+// tinyQwen has one decoder layer: q 64×64 · k 16×64 · v 16×64 · o 64×64 · gate · up 128×64 · down 64×128.
+var tinyQwen = map[string][]int64{
+	"model.embed_tokens.weight":              {1000, 64},
+	"model.layers.0.self_attn.q_proj.weight": {64, 64},
+	"model.layers.0.self_attn.q_proj.bias":   {64},
+	"model.layers.0.self_attn.k_proj.weight": {16, 64},
+	"model.layers.0.self_attn.v_proj.weight": {16, 64},
+	"model.layers.0.self_attn.o_proj.weight": {64, 64},
+	"model.layers.0.mlp.gate_proj.weight":    {128, 64},
+	"model.layers.0.mlp.up_proj.weight":      {128, 64},
+	"model.layers.0.mlp.down_proj.weight":    {64, 128},
+	"lm_head.weight":                         {1000, 64},
+}
+
+func qloraObjects(t *testing.T) fakeObjects {
+	weights := safetensorsFile(t, tinyQwen)
+	manifest := fixedManifest(t, func(m *model.DatasetManifest) {
+		m.Files = append(m.Files, model.ManifestEntry{Name: "model/model.safetensors", SHA256: "cc", SizeBytes: int64(len(weights))})
+	})
+	return fakeObjects{fixedPrefix + "manifest.json": manifest, fixedPrefix + "code/train.py": fixedTrain,
+		fixedPrefix + "model/model.safetensors": weights}
+}
+
+func TestSubmitQLoRAWritesTheAdapterIntoConfigAndSizesTheCheckpointByIt(t *testing.T) {
+	sched := &submitted{}
+	spec := fixedSpec()
+	spec.Finetune = "qlora"
+	created, err := submitService(t, qloraObjects(t), sched).Submit(context.Background(), spec, &parts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg model.TrainConfig
+	if err := json.Unmarshal(created.Config, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SchemaVersion != 3 || cfg.Finetune.Method != "qlora" || cfg.Finetune.Lora == nil || cfg.Finetune.Lora.R != 16 ||
+		len(cfg.Finetune.Lora.TargetModules) != 7 {
+		t.Errorf("config schema %d finetune %+v, want 3 · qlora with the default LoRA", cfg.SchemaVersion, cfg.Finetune)
+	}
+	// 어댑터 16 · (128 + 80 + 80 + 128 + 192 · 3) = 15,872개 × 12 B ÷ 2 pods → 1 ms 남짓, 하한 300 s
+	if cfg.CheckpointPolicy.EstimatedSaveSeconds != 0 || cfg.CheckpointPolicy.IntervalSeconds != 300 {
+		t.Errorf("policy %+v, want the adapter's tiny save and the 300 s floor", cfg.CheckpointPolicy)
+	}
+	if got := sched.js.GetAnnotations()[model.FinetuneAnnotation]; got != "qlora" {
+		t.Errorf("JobSet annotation %s = %q, want qlora", model.FinetuneAnnotation, got)
+	}
+}
+
+func TestSubmitFullStaysTheDefaultAndCountsEveryParameter(t *testing.T) {
+	created, err := submitService(t, qloraObjects(t), &submitted{}).Submit(context.Background(), fixedSpec(), &parts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Finetune map[string]any `json:"finetune"`
+	}
+	if err := json.Unmarshal(created.Config, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Finetune["method"] != "full" || cfg.Finetune["lora"] != nil {
+		t.Errorf("finetune = %v, want full with lora null (train.py rejects missing keys)", cfg.Finetune)
+	}
+}
+
+func TestSubmitQLoRARejects(t *testing.T) {
+	ddp := fixedSpec()
+	ddp.Finetune, ddp.Strategy = "qlora", "ddp"
+	unknown := fixedSpec()
+	unknown.Finetune = "lora"
+	noSafetensors := fixedSpec()
+	noSafetensors.Finetune = "qlora"
+	for name, c := range map[string]struct {
+		spec model.SubmitSpec
+		objs fakeObjects
+	}{
+		"ddp":            {ddp, qloraObjects(t)},
+		"unknown method": {unknown, qloraObjects(t)},
+		"no safetensors": {noSafetensors, fakeObjects{fixedPrefix + "manifest.json": fixedManifest(t, nil), fixedPrefix + "code/train.py": fixedTrain}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sched := &submitted{}
+			_, err := submitService(t, c.objs, sched).Submit(context.Background(), c.spec, &parts{})
+			var e *Error
+			if !errors.As(err, &e) || e.Kind != KindInvalid || !strings.Contains(err.Error(), "finetune") {
+				t.Fatalf("err = %v, want an invalid finetune field", err)
+			}
+			if sched.js != nil {
+				t.Error("a JobSet was submitted")
+			}
+		})
 	}
 }

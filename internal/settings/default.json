@@ -20,9 +20,22 @@
     "fsdp": { "checkpoint_format": "fsdp-dcp", "min_gpus": 1 },
     "ddp": { "checkpoint_format": "ddp-pt", "min_gpus": 1 }
   },
+  "finetune_methods": {
+    "full": { "strategies": ["fsdp", "ddp"] },
+    "qlora": {
+      "strategies": ["fsdp"],
+      "lora": {
+        "r": 16,
+        "alpha": 32,
+        "dropout": 0.05,
+        "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+      }
+    }
+  },
   "training": {
     "dataset_format": "text-jsonl",
     "default_strategy": "fsdp",
+    "default_finetune": "full",
     "gpus": { "min": 1, "max": 4, "default": 2, "options": [1, 2, 4] },
     "defaults": {
       "epochs": 10,
@@ -42,7 +55,7 @@
     ]
   },
   "checkpoint": {
-    "size_factor": 3,
+    "bytes_per_param": 12,
     "write_bytes_per_second": 100000000,
     "mtbf_seconds": 21600,
     "min_interval_seconds": 300,

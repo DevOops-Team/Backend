@@ -24,9 +24,12 @@ type Settings struct {
 	Images          Images              `json:"images"`
 	Pod             Pod                 `json:"pod"`
 	Strategies      map[string]Strategy `json:"strategies"`
-	Training        Training            `json:"training"`
-	Checkpoint      Checkpoint          `json:"checkpoint"`
-	Limits          Limits              `json:"limits"`
+	// FinetuneMethods are the training methods a submission may pick (GPU-262): full trains every
+	// parameter, qlora a LoRA adapter on 4-bit base weights. train.py reads it from config.json finetune.
+	FinetuneMethods map[string]FinetuneMethod `json:"finetune_methods"`
+	Training        Training                  `json:"training"`
+	Checkpoint      Checkpoint                `json:"checkpoint"`
+	Limits          Limits                    `json:"limits"`
 }
 
 type Queue struct {
@@ -64,11 +67,30 @@ type Strategy struct {
 	MinGPUs          int    `json:"min_gpus"`
 }
 
+// FinetuneMethod is one training method. Strategies are the distributed strategies it runs with
+// (QLoRA: FSDP only, the trainer's FSDP-QLoRA path). Lora is set for qlora only.
+type FinetuneMethod struct {
+	Strategies []string `json:"strategies"`
+	Lora       *Lora    `json:"lora,omitempty"`
+}
+
+// Lora is the adapter written into config.json finetune.lora (peft LoraConfig).
+type Lora struct {
+	R             int      `json:"r"`
+	Alpha         int      `json:"alpha"`
+	Dropout       float64  `json:"dropout"`
+	TargetModules []string `json:"target_modules"`
+}
+
+// FinetuneNames are the methods the trainer harness knows (Data trainer/devoops_ckpt.py FINETUNE_METHODS).
+var FinetuneNames = []string{"full", "qlora"}
+
 // Training is what a submission may choose. Any Hugging Face model folder is accepted, so there are
 // no per-model profiles: one set of defaults and ranges for every model.
 type Training struct {
 	DatasetFormat   string           `json:"dataset_format"`
 	DefaultStrategy string           `json:"default_strategy"`
+	DefaultFinetune string           `json:"default_finetune"`
 	GPUs            GPURange         `json:"gpus"`
 	Defaults        Defaults         `json:"defaults"`
 	Hyperparameters []Hyperparameter `json:"hyperparameters"`
@@ -106,7 +128,7 @@ type Hyperparameter struct {
 // Checkpoint holds the Young/Daly inputs (design §5). The backend turns them into a time interval;
 // train.py turns the interval into a step interval once it has measured its step time.
 type Checkpoint struct {
-	SizeFactor          float64 `json:"size_factor"`            // checkpoint bytes ÷ model folder bytes (fp32 weights + Adam moments ≈ 3)
+	BytesPerParam       float64 `json:"bytes_per_param"`        // checkpoint bytes per saved parameter: fp32 weight 4 + Adam moments 8 (GPU-261)
 	WriteBytesPerSecond float64 `json:"write_bytes_per_second"` // local NVMe DCP write; the sidecar uploads in parallel
 	MTBFSeconds         float64 `json:"mtbf_seconds"`           // mean time between failures; unknown, so a fixed default
 	MinIntervalSeconds  float64 `json:"min_interval_seconds"`
@@ -145,6 +167,27 @@ func Load(path string) (Settings, error) {
 
 func (s Settings) check() error {
 	var errs []error
+	if _, ok := s.FinetuneMethods[s.Training.DefaultFinetune]; !ok {
+		errs = append(errs, fmt.Errorf("training.default_finetune %q is not in finetune_methods", s.Training.DefaultFinetune))
+	}
+	for name, m := range s.FinetuneMethods {
+		if !slices.Contains(FinetuneNames, name) {
+			errs = append(errs, fmt.Errorf("finetune method %s: the trainer knows %v", name, FinetuneNames))
+		}
+		if len(m.Strategies) == 0 {
+			errs = append(errs, fmt.Errorf("finetune method %s has no strategies", name))
+		}
+		for _, st := range m.Strategies {
+			if _, ok := s.Strategies[st]; !ok {
+				errs = append(errs, fmt.Errorf("finetune method %s: strategy %s is not in strategies", name, st))
+			}
+		}
+		if (name == "qlora") != (m.Lora != nil) {
+			errs = append(errs, fmt.Errorf("finetune method %s: lora is set for qlora only", name))
+		} else if m.Lora != nil && (m.Lora.R < 1 || m.Lora.Alpha < 1 || m.Lora.Dropout < 0 || m.Lora.Dropout >= 1 || len(m.Lora.TargetModules) == 0) {
+			errs = append(errs, fmt.Errorf("finetune method %s: lora needs r · alpha >= 1, 0 <= dropout < 1 and target_modules", name))
+		}
+	}
 	if _, ok := s.Strategies[s.Training.DefaultStrategy]; !ok {
 		errs = append(errs, fmt.Errorf("training.default_strategy %q is not in strategies", s.Training.DefaultStrategy))
 	}
@@ -158,7 +201,7 @@ func (s Settings) check() error {
 		errs = append(errs, fmt.Errorf("training.gpus.default %d must be an option within max %d", g.Default, g.Max))
 	}
 	c := s.Checkpoint
-	if c.SizeFactor <= 0 || c.WriteBytesPerSecond <= 0 || c.MTBFSeconds <= 0 || c.MinIntervalSeconds <= 0 || c.WarmupMeasureSteps < 1 {
+	if c.BytesPerParam <= 0 || c.WriteBytesPerSecond <= 0 || c.MTBFSeconds <= 0 || c.MinIntervalSeconds <= 0 || c.WarmupMeasureSteps < 1 {
 		errs = append(errs, errors.New("checkpoint values must be positive"))
 	}
 	l := s.Limits

@@ -15,6 +15,7 @@ const (
 	GPUGroupValue      = "train"
 
 	StrategyAnnotation     = "devoops/strategy"
+	FinetuneAnnotation     = "devoops/finetune" // full · qlora (GPU-262)
 	WorldSizeAnnotation    = "devoops/world-size"
 	ModelAnnotation        = "devoops/model"
 	DatasetAnnotation      = "devoops/dataset" // "<id>/v<version>"
