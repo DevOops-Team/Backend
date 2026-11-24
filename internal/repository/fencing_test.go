@@ -15,12 +15,24 @@ import (
 )
 
 type fakeFencingDB struct {
-	got  *dynamodb.UpdateItemInput
-	old  map[string]types.AttributeValue // set: the condition fails with this item
-	fail error
+	got    *dynamodb.UpdateItemInput
+	put    *dynamodb.PutItemInput
+	read   *dynamodb.GetItemInput
+	stored map[string]types.AttributeValue // GetItem answers this item (nil = no item)
+	old    map[string]types.AttributeValue // set: the condition fails with this item
+	fail   error
 }
 
-func (f *fakeFencingDB) PutItem(context.Context, *dynamodb.PutItemInput, ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+func (f *fakeFencingDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	f.read = in
+	if f.fail != nil {
+		return nil, f.fail
+	}
+	return &dynamodb.GetItemOutput{Item: f.stored}, nil
+}
+
+func (f *fakeFencingDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+	f.put = in
 	return &dynamodb.PutItemOutput{}, nil
 }
 
@@ -93,5 +105,47 @@ func TestRestartRefusesAMovedGenerationOrARecovery(t *testing.T) {
 	f := &Fencing{db: &fakeFencingDB{fail: errors.New("throttled")}, table: "fencing"}
 	if err := f.Restart(t.Context(), "aa11", 2, restartAt); err == nil || errors.Is(err, model.ErrGenerationMoved) {
 		t.Errorf("err = %v, want the DynamoDB error", err)
+	}
+}
+
+const testDigest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestCreateRecordsTheJobsetHashWithGenerationOne(t *testing.T) {
+	db := &fakeFencingDB{}
+	f := &Fencing{db: db, table: "fencing"}
+	if err := f.Create(t.Context(), "aa11", testDigest); err != nil {
+		t.Fatal(err)
+	}
+	it := db.put.Item
+	if it["job_id"].(*types.AttributeValueMemberS).Value != "aa11" || it["generation"].(*types.AttributeValueMemberN).Value != "1" ||
+		it[JobsetSHA256Attr].(*types.AttributeValueMemberS).Value != testDigest {
+		t.Errorf("item = %v", it)
+	}
+	if *db.put.ConditionExpression != "attribute_not_exists(job_id)" {
+		t.Errorf("condition = %s", *db.put.ConditionExpression)
+	}
+}
+
+func TestJobsetSHA256ReadsTheRecordedHashConsistently(t *testing.T) {
+	stored := map[string]types.AttributeValue{"job_id": &types.AttributeValueMemberS{Value: "aa11"},
+		JobsetSHA256Attr: &types.AttributeValueMemberS{Value: testDigest}}
+	db := &fakeFencingDB{stored: stored}
+	f := &Fencing{db: db, table: "fencing"}
+	got, err := f.JobsetSHA256(t.Context(), "aa11")
+	if err != nil || got != testDigest {
+		t.Fatalf("JobsetSHA256 = %q, %v", got, err)
+	}
+	if !*db.read.ConsistentRead || db.read.Key["job_id"].(*types.AttributeValueMemberS).Value != "aa11" {
+		t.Errorf("read = %+v", db.read)
+	}
+
+	// An item from before GPU-119 has no hash: "" (the service answers 422), not "no item".
+	db.stored = map[string]types.AttributeValue{"job_id": &types.AttributeValueMemberS{Value: "aa11"}}
+	if got, err := f.JobsetSHA256(t.Context(), "aa11"); err != nil || got != "" {
+		t.Errorf("item without hash = %q, %v", got, err)
+	}
+	db.stored = nil
+	if _, err := f.JobsetSHA256(t.Context(), "aa11"); !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("no item = %v, want ErrNotFound", err)
 	}
 }
