@@ -39,7 +39,7 @@ func (s *submitted) Stop(context.Context, string, time.Time) ([]string, error) {
 
 type noFencing struct{}
 
-func (noFencing) Create(context.Context, string) error                  { return nil }
+func (noFencing) Create(context.Context, string, string) error          { return nil }
 func (noFencing) Restart(context.Context, string, int, time.Time) error { return nil }
 
 type noLifecycle struct{}
@@ -327,5 +327,39 @@ func TestSubmitQLoRARejects(t *testing.T) {
 				t.Error("a JobSet was submitted")
 			}
 		})
+	}
+}
+
+// digestFencing remembers the jobset.json hash the submission recorded with the fencing item.
+type digestFencing struct {
+	noFencing
+	got *string
+}
+
+func (f digestFencing) Create(_ context.Context, _ string, digest string) error {
+	*f.got = digest
+	return nil
+}
+
+// The fencing item records the hash of the jobset.json bytes put in S3 (GPU-119): the recovery API returns it
+// so the controller can tell the submitted original from a later change.
+func TestSubmitRecordsTheHashOfTheStoredJobsetJSON(t *testing.T) {
+	cfg, err := settings.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs := fakeObjects{fixedPrefix + "manifest.json": fixedManifest(t, nil), fixedPrefix + "code/train.py": fixedTrain}
+	var digest string
+	svc := NewJobService(Config{Namespace: "training", Region: "us-east-2", Bucket: "ckpt",
+		Settings: cfg.WithImages("ghcr.io/x/trainer:1", "ghcr.io/x/checkpoint:1"),
+		NewID:    func() string { return "a1b2c3d4" }},
+		Deps{Objects: bucketObjects{objs}, Scheduler: &submitted{}, Fencing: digestFencing{got: &digest},
+			Lifecycle: noLifecycle{}, Record: noRecord{}})
+	if _, err := svc.Submit(context.Background(), fixedSpec(), &parts{}); err != nil {
+		t.Fatal(err)
+	}
+	stored, ok := objs["code/a1b2c3d4/jobset.json"]
+	if !ok || digest == "" || digest != hexSum(stored) {
+		t.Errorf("recorded %q, stored jobset.json hashes to %q", digest, hexSum(stored))
 	}
 }

@@ -30,7 +30,7 @@ type JobService interface {
 
 // NewRouter wires middleware and routes. The API routes must match api/openapi.yaml
 // (TestOpenAPISpecMatchesRoutes); the docs routes are not part of the API.
-func NewRouter(jobs JobService, allowedOrigin string) *gin.Engine {
+func NewRouter(jobs JobService, allowedOrigin string, internal Internal) *gin.Engine {
 	r := gin.New()
 	r.Use(middleware.Logger(), gin.Recovery(), middleware.CORS(allowedOrigin))
 	if err := r.SetTrustedProxies(nil); err != nil { // no proxy in front; ignore X-Forwarded-For
@@ -51,6 +51,10 @@ func NewRouter(jobs JobService, allowedOrigin string) *gin.Engine {
 	r.GET("/api/jobs/:id/files/:kind/:name", h.file)
 	r.GET("/api/jobs/:id/model", h.model)
 	r.GET("/api/jobs/:id/model/files/:name", h.modelFile)
+
+	// Service-to-service API for the recovery controller (GPU-119); bearer token, not proxied by the frontend.
+	in := r.Group("/internal/v1", serviceAuth(internal.Token))
+	in.GET("/recovery/jobs/:id", (&recoveryHandler{recovery: internal.Recovery}).metadata)
 
 	r.GET("/openapi.yaml", openAPISpec)
 	r.GET("/swagger/", swaggerUI)

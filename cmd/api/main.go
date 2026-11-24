@@ -79,6 +79,7 @@ func run() error {
 	}
 	defer records.Close()
 
+	fencing := repository.NewFencing(db, cfg.FencingTable)
 	jobs := service.NewJobService(service.Config{
 		Namespace:      cfg.Namespace,
 		Region:         cfg.Region,
@@ -92,11 +93,15 @@ func run() error {
 		Objects:   repository.NewObjects(s3.NewFromConfig(awsCfg), cfg.Bucket),
 		Scheduler: kube,
 		Records:   records,
-		Fencing:   repository.NewFencing(db, cfg.FencingTable),
+		Fencing:   fencing,
 		Lifecycle: lifecycle,
 		Events:    timelineStore,
 		Record:    timelineStore,
 	})
+
+	// Recovery controller lookup (GPU-119). No placement source is connected yet: the worker nodes of a job
+	// are on the EKS workers, which the backend does not read, so the lookup answers 503 until one is.
+	recovery := service.NewRecoveryService(cfg.Bucket, jobs, kube, fencing, service.NoPlacement{})
 
 	// Management-cluster steps (Kueue quota, MultiKueue dispatch, finish) for the job timeline.
 	go timeline.NewTracker(kube, timelineStore, model.ManagerCluster).Run(ctx, 2*time.Second)
@@ -104,7 +109,7 @@ func run() error {
 	gin.SetMode(gin.ReleaseMode)
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           handler.NewRouter(jobs, cfg.AllowedOrigin),
+		Handler:           handler.NewRouter(jobs, cfg.AllowedOrigin, handler.Internal{Recovery: recovery, Token: cfg.RecoveryAPIToken}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
