@@ -450,7 +450,7 @@ components:
           type: array
           description: 그 세대의 모든 참여 노드, 중복 없이 GPU 수만큼
           items: { type: string }
-        placement_generation: { type: integer, minimum: 1, description: 이 배치가 속한 실행 세대 }
+        placement_generation: { type: integer, minimum: 1, description: 이 배치가 속한 실행 세대. 요청 세대(generation)와 항상 같다 }
         jobset_name: { type: string, example: job-abc123-g0001 }
         jobset_uid: { type: string, description: 관리 클러스터 JobSet UID }
         observed_at: { type: integer, format: int64, description: 배치를 확인한 시각 (응답 시각 아님) }

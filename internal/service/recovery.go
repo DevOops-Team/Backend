@@ -162,8 +162,9 @@ func recoveryEligible(st model.Status) bool {
 }
 
 // placementProblem checks a placement before it is returned: one distinct, non-empty node per GPU, a
-// worker cluster, a generation not after the requested one, and an observation time. A placement that
-// fails is treated as not available rather than passed on.
+// worker cluster, the requested generation exactly (the controller refuses any other: an earlier
+// generation's nodes are not where the failed one ran), and an observation time. A placement that fails is
+// treated as not available rather than passed on.
 func placementProblem(p model.Placement, gen int, job model.Job) string {
 	if !clusterPattern.MatchString(p.Cluster) {
 		return "cluster " + strconv.Quote(p.Cluster) + " is not a worker cluster"
@@ -181,8 +182,8 @@ func placementProblem(p model.Placement, gen int, job model.Job) string {
 		}
 		seen[n] = true
 	}
-	if p.Generation < 1 || p.Generation > gen {
-		return fmt.Sprintf("placement generation %d is not in 1..%d", p.Generation, gen)
+	if p.Generation != gen {
+		return fmt.Sprintf("placement generation %d is not the requested generation %d", p.Generation, gen)
 	}
 	if p.ObservedAt <= 0 {
 		return "no observation time"
