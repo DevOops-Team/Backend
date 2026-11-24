@@ -391,7 +391,7 @@ components:
           type: array
           description: 서비스가 제공하는 GPU 수
           items: { type: integer }
-          example: [1, 2, 4]
+          example: [1, 2, 3, 4]
         default: { type: integer, description: 입력하지 않았을 때 프론트가 보내는 값 }
 
     TrainingOptions:
