@@ -17,7 +17,9 @@ import (
 var ginParam = regexp.MustCompile(`:(\w+)`)
 
 // newRouter builds the real router; listing routes and serving the docs never call the service.
-func newRouter(jobs JobService) *gin.Engine { return NewRouter(jobs, "http://localhost:5173") }
+func newRouter(jobs JobService) *gin.Engine {
+	return NewRouter(jobs, "http://localhost:5173", Internal{})
+}
 
 // openapi.yaml is maintained by hand, so this keeps it in step with the routes Gin actually serves.
 func TestOpenAPISpecMatchesRoutes(t *testing.T) {

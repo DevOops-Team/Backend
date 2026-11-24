@@ -181,6 +181,9 @@ func fail(c *gin.Context, err error) {
 	case service.KindUpstream:
 		status = http.StatusBadGateway
 		slog.Error(se.Msg, "path", c.Request.URL.Path)
+	case service.KindUnavailable:
+		status = http.StatusServiceUnavailable
+		slog.Warn(se.Msg, "path", c.Request.URL.Path, "code", se.ErrorCode())
 	}
 	c.JSON(status, model.ErrorResponse{Error: se.Msg, Code: se.ErrorCode(), Fields: se.Fields})
 }

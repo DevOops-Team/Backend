@@ -57,6 +57,19 @@ func (c *Kube) Submit(ctx context.Context, js *unstructured.Unstructured) error 
 	return err
 }
 
+// JobSetUID returns the UID of the JobSet named name on the management cluster (not a MultiKueue copy on a
+// worker), or model.ErrNotFound.
+func (c *Kube) JobSetUID(ctx context.Context, name string) (string, error) {
+	js, err := c.dyn.Resource(JobSetGVR).Namespace(c.namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "", fmt.Errorf("jobset %s: %w", name, model.ErrNotFound)
+	}
+	if err != nil {
+		return "", fmt.Errorf("get jobset %s: %w", name, err)
+	}
+	return string(js.GetUID()), nil
+}
+
 func (c *Kube) List(ctx context.Context) ([]model.JobStatus, error) {
 	jobsets, err := c.dyn.Resource(JobSetGVR).Namespace(c.namespace).List(ctx, metav1.ListOptions{LabelSelector: model.JobIDLabel})
 	if err != nil {
