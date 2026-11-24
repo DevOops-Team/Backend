@@ -60,7 +60,7 @@ func TestDefaultGPUOptionsCanBeSubmittedForBothStrategies(t *testing.T) {
 	s := NewJobService(Config{Settings: cfg}, Deps{})
 	options := s.Options()
 	for _, strategy := range options.Strategies {
-		for _, count := range []int{1, 2, 4} {
+		for _, count := range []int{1, 2, 3, 4} {
 			if _, _, _, err := s.validate(model.SubmitSpec{Strategy: strategy.Name, GPUs: count}); err != nil {
 				t.Errorf("validate strategy %s with %d GPUs: %v", strategy.Name, count, err)
 			}

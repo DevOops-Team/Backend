@@ -3,11 +3,12 @@ package settings
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
 
-func TestDefaultSettingsOfferOneTwoAndFourGPUs(t *testing.T) {
+func TestDefaultSettingsOfferOneToFourGPUs(t *testing.T) {
 	s, err := Load("")
 	if err != nil {
 		t.Fatal(err)
@@ -16,8 +17,8 @@ func TestDefaultSettingsOfferOneTwoAndFourGPUs(t *testing.T) {
 	if tr.DefaultStrategy != "fsdp" || tr.GPUs.Default != 2 || tr.GPUs.Max != 4 {
 		t.Errorf("training = %+v, want fsdp with default 2 and maximum 4 GPUs", tr)
 	}
-	if got := tr.GPUs.Options; len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 4 {
-		t.Errorf("gpu options = %v, want 1, 2, 4", got)
+	if got := tr.GPUs.Options; !slices.Equal(got, []int{1, 2, 3, 4}) {
+		t.Errorf("gpu options = %v, want 1, 2, 3, 4", got)
 	}
 	if tr.DatasetFormat != "text-jsonl" {
 		t.Errorf("dataset format = %q", tr.DatasetFormat)
