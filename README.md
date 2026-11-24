@@ -40,7 +40,7 @@ Frontend ◀── 폴링 ── Backend ◀── 데이터 DB v_job_status (ba
 | `cluster` · `active_nodes` · `placement_generation` · `observed_at` | 배치 출처(`service.PlacementSource`). **아직 연결되지 않아** 지금은 항상 503 `PLACEMENT_UNAVAILABLE` |
 
 - 404 작업 · 세대 없음, 422 잘못된 요청 · 펜싱 항목 없음 · 해시 없음(GPU-119 이전 제출), 503 배치 모름 · 일시 오류 · 토큰 미설정, 401 토큰 없음 · 틀림
-- 배치 출처가 생기면 `PlacementSource`를 구현해 `cmd/api/main.go`의 `service.NoPlacement{}` 자리에 넣는다. 노드 수 · 중복 · 클러스터 · 세대 · 관측 시각을 검사해 맞지 않으면 200 대신 503
+- 배치 출처가 생기면 `PlacementSource`를 구현해 `cmd/api/main.go`의 `service.NoPlacement{}` 자리에 넣는다. 노드 수 · 중복 · 클러스터 · 세대(요청 세대와 정확히 같아야 함) · 관측 시각을 검사해 맞지 않으면 200 대신 503
 
 ## 체크포인트 간격
 

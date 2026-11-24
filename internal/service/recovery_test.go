@@ -189,3 +189,25 @@ func TestRecoveryMetadataRefusesAnIncompletePlacement(t *testing.T) {
 		}
 	}
 }
+
+// A placement of an earlier generation is not the failed generation's: the controller accepts only an exact
+// match, so the backend answers 503 instead of passing generation 1's nodes for generation 2.
+func TestRecoveryMetadataRefusesAPlacementOfAnEarlierGeneration(t *testing.T) {
+	job := runningJob()
+	job.Generation = 2
+	c := recCase{jobs: &recJobs{job: job}, jobsets: recJobSets{"job-abc123-g0002": "uid-2"},
+		placement: recPlacement{p: goodPlacement()}} // placement generation 1
+	_, err := c.service().Metadata(t.Context(), "abc123", 2)
+	var se *Error
+	if !errors.As(err, &se) || se.Kind != KindUnavailable || se.Code != "PLACEMENT_UNAVAILABLE" {
+		t.Errorf("generation 2 with a generation 1 placement: err = %v, want 503 PLACEMENT_UNAVAILABLE", err)
+	}
+
+	p := goodPlacement()
+	p.Generation = 2
+	c.placement = recPlacement{p: p}
+	got, err := c.service().Metadata(t.Context(), "abc123", 2)
+	if err != nil || got.PlacementGeneration != 2 || got.Generation != 2 || got.JobsetUID != "uid-2" {
+		t.Errorf("generation 2 with its own placement = %+v, %v", got, err)
+	}
+}
