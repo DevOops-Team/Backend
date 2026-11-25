@@ -16,7 +16,6 @@ const (
 	KindUnprocessable                 // dataset format the model does not read (422)
 	KindUpstream                      // S3, the management cluster or DynamoDB failed (502)
 	KindTooLarge                      // the upload is over a limit (413)
-	KindUnavailable                   // not ready yet or a dependency failed; retry later (503, recovery API)
 )
 
 func (k Kind) String() string {
@@ -31,8 +30,6 @@ func (k Kind) String() string {
 		return "unprocessable"
 	case KindUpstream:
 		return "upstream"
-	case KindUnavailable:
-		return "unavailable"
 	}
 	return fmt.Sprintf("Kind(%d)", int(k))
 }
@@ -67,8 +64,6 @@ func (e *Error) ErrorCode() string {
 		return "UPSTREAM"
 	case KindTooLarge:
 		return "TOO_LARGE"
-	case KindUnavailable:
-		return "UNAVAILABLE"
 	}
 	return ""
 }

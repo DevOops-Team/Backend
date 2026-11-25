@@ -70,8 +70,8 @@ type JobRecords interface {
 
 // Fencing writes the backend's part of the fencing table (DynamoDB).
 type Fencing interface {
-	// Create writes the job's first item with the SHA-256 of its jobset.json (the recovery original,
-	// GPU-119); model.ErrAlreadyExists if it exists.
+	// Create writes the job's first item with the SHA-256 of its jobset.json (the recovery original, also sent
+	// in job.submitted, GPU-271); model.ErrAlreadyExists if it exists.
 	Create(ctx context.Context, jobID, jobsetSHA256 string) error
 	// Restart moves a stopped job from generation from to from+1 for a user restart (GPU-240); nil when it is
 	// already there, model.ErrGenerationMoved when the item is elsewhere or a recovery owns it.

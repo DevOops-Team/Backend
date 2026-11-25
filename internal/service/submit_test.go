@@ -348,8 +348,8 @@ func (f digestFencing) Create(_ context.Context, _ string, digest string) error 
 	return nil
 }
 
-// The fencing item records the hash of the jobset.json bytes put in S3 (GPU-119): the recovery API returns it
-// so the controller can tell the submitted original from a later change.
+// The fencing item records the hash of the jobset.json bytes put in S3, the same value job.submitted carries
+// (GPU-271), so the recovery controller can tell the submitted original from a later change.
 func TestSubmitRecordsTheHashOfTheStoredJobsetJSON(t *testing.T) {
 	cfg, err := settings.Load("")
 	if err != nil {
