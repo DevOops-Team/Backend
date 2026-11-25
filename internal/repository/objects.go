@@ -25,6 +25,9 @@ type s3Reader interface {
 	s3.ListObjectVersionsAPIClient
 	GetObject(ctx context.Context, in *s3.GetObjectInput, opts ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 	HeadObject(ctx context.Context, in *s3.HeadObjectInput, opts ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
+	CreateMultipartUpload(ctx context.Context, in *s3.CreateMultipartUploadInput, opts ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error)
+	CompleteMultipartUpload(ctx context.Context, in *s3.CompleteMultipartUploadInput, opts ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error)
+	s3.ListPartsAPIClient
 	DeleteObjects(ctx context.Context, in *s3.DeleteObjectsInput, opts ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error)
 }
 
@@ -107,11 +110,10 @@ func (o *Objects) Presign(ctx context.Context, key, filename string, ttl time.Du
 // Presign, the URL also stops working when the backend's Roles Anywhere session expires; S3 checks the
 // signature when the upload starts.
 func (o *Objects) PresignPut(ctx context.Context, key string, size int64, sha256Hex string, ttl time.Duration) (string, map[string]string, error) {
-	sum, err := hex.DecodeString(sha256Hex)
-	if err != nil || len(sum) != 32 {
-		return "", nil, fmt.Errorf("sha256 must be 64 hex characters")
+	b64, err := hexToBase64(sha256Hex)
+	if err != nil {
+		return "", nil, err
 	}
-	b64 := base64.StdEncoding.EncodeToString(sum)
 	req, err := o.presigner.PresignPutObject(ctx, &s3.PutObjectInput{
 		Bucket:         aws.String(o.bucket),
 		Key:            aws.String(key),
@@ -145,6 +147,77 @@ func (o *Objects) Head(ctx context.Context, key string) (model.ObjectHead, error
 		h.SHA256 = hex.EncodeToString(sum)
 	}
 	return h, nil
+}
+
+// CreateMultipart starts a multipart upload whose parts each carry a SHA-256 checksum (composite checksum).
+func (o *Objects) CreateMultipart(ctx context.Context, key string) (string, error) {
+	res, err := o.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String(o.bucket), Key: aws.String(key),
+		ChecksumAlgorithm: types.ChecksumAlgorithmSha256})
+	if err != nil {
+		return "", err
+	}
+	return aws.ToString(res.UploadId), nil
+}
+
+// PresignUploadPart signs one part PUT with its size and SHA-256 (like PresignPut).
+func (o *Objects) PresignUploadPart(ctx context.Context, key, uploadID string, number int32, size int64, sha256Hex string, ttl time.Duration) (string, map[string]string, error) {
+	b64, err := hexToBase64(sha256Hex)
+	if err != nil {
+		return "", nil, err
+	}
+	req, err := o.presigner.PresignUploadPart(ctx, &s3.UploadPartInput{
+		Bucket: aws.String(o.bucket), Key: aws.String(key), UploadId: aws.String(uploadID), PartNumber: aws.Int32(number),
+		ContentLength: aws.Int64(size), ChecksumSHA256: aws.String(b64),
+	}, s3.WithPresignExpires(ttl))
+	if err != nil {
+		return "", nil, err
+	}
+	return req.URL, map[string]string{"x-amz-checksum-sha256": b64}, nil
+}
+
+func (o *Objects) ListParts(ctx context.Context, key, uploadID string) ([]model.UploadedPart, error) {
+	var out []model.UploadedPart
+	pages := s3.NewListPartsPaginator(o.client, &s3.ListPartsInput{Bucket: aws.String(o.bucket), Key: aws.String(key), UploadId: aws.String(uploadID)})
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		var missing *types.NoSuchUpload
+		if errors.As(err, &missing) {
+			return nil, model.ErrNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range page.Parts {
+			part := model.UploadedPart{Number: aws.ToInt32(p.PartNumber), ETag: aws.ToString(p.ETag), Size: aws.ToInt64(p.Size)}
+			if sum, err := base64.StdEncoding.DecodeString(aws.ToString(p.ChecksumSHA256)); err == nil && len(sum) == 32 {
+				part.SHA256 = hex.EncodeToString(sum)
+			}
+			out = append(out, part)
+		}
+	}
+	return out, nil
+}
+
+func (o *Objects) CompleteMultipart(ctx context.Context, key, uploadID string, parts []model.UploadedPart) error {
+	done := make([]types.CompletedPart, 0, len(parts))
+	for _, p := range parts {
+		b64, err := hexToBase64(p.SHA256)
+		if err != nil {
+			return err
+		}
+		done = append(done, types.CompletedPart{PartNumber: aws.Int32(p.Number), ETag: aws.String(p.ETag), ChecksumSHA256: aws.String(b64)})
+	}
+	_, err := o.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{Bucket: aws.String(o.bucket), Key: aws.String(key),
+		UploadId: aws.String(uploadID), MultipartUpload: &types.CompletedMultipartUpload{Parts: done}})
+	return err
+}
+
+func hexToBase64(sha256Hex string) (string, error) {
+	sum, err := hex.DecodeString(sha256Hex)
+	if err != nil || len(sum) != 32 {
+		return "", fmt.Errorf("sha256 must be 64 hex characters")
+	}
+	return base64.StdEncoding.EncodeToString(sum), nil
 }
 
 // deleteBatch is the most keys one DeleteObjects call takes.

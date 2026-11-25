@@ -43,6 +43,12 @@ type ObjectStore interface {
 	PresignPut(ctx context.Context, key string, size int64, sha256 string, ttl time.Duration) (string, map[string]string, error)
 	// Head returns the object's size and SHA-256 checksum, or model.ErrNotFound.
 	Head(ctx context.Context, key string) (model.ObjectHead, error)
+	// Multipart upload with a SHA-256 checksum per part (GPU-278): S3 refuses a part whose bytes do not match the
+	// signed checksum. ListParts of an unknown upload is model.ErrNotFound.
+	CreateMultipart(ctx context.Context, key string) (string, error)
+	PresignUploadPart(ctx context.Context, key, uploadID string, number int32, size int64, sha256 string, ttl time.Duration) (string, map[string]string, error)
+	ListParts(ctx context.Context, key, uploadID string) ([]model.UploadedPart, error)
+	CompleteMultipart(ctx context.Context, key, uploadID string, parts []model.UploadedPart) error
 	// DeleteAll permanently removes every object under prefix, including old versions and delete markers
 	// (the bucket is versioned). Nothing under the prefix is not an error.
 	DeleteAll(ctx context.Context, prefix string) error

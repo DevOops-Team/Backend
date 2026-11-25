@@ -26,9 +26,32 @@ const (
 	// UploadURLTTL bounds a presigned PUT. The URL also dies with the backend's Roles Anywhere session (1 hour),
 	// whichever comes first; S3 checks it when each PUT starts, so a long upload that started in time finishes.
 	UploadURLTTL = time.Hour
-	// maxPutBytes is S3's limit for one PUT. The upload limits are below it; it guards a raised limit.
+	// maxPutBytes is S3's limit for one PUT (a whole file or one part).
 	maxPutBytes = 5 << 30
+	// Multipart part size the browser may choose: S3 needs at least 5 MiB for every part but the last.
+	minPartBytes = 5 << 20
+	maxPartBytes = 512 << 20
+	maxParts     = 10000 // S3 limit
+	// uploadStateName holds the S3 multipart upload ids next to the manifest. ckpt-init downloads only the
+	// manifest's files, so the pods never see it.
+	uploadStateName = "upload.json"
 )
+
+// uploadState is datasets/<id>/v1/upload.json: the multipart files of an upload.
+type uploadState struct {
+	PartBytes int64                    `json:"part_bytes"`
+	Multipart map[string]multipartFile `json:"multipart"` // by dataset file name (model/…)
+}
+
+type multipartFile struct {
+	UploadID string   `json:"upload_id"`
+	Parts    []string `json:"parts"` // SHA-256 hex per part
+}
+
+// partSize is the size of part i (0-based) of a size-byte file cut into partBytes parts.
+func partSize(size, partBytes int64, i int) int64 {
+	return min(partBytes, size-int64(i)*partBytes)
+}
 
 // validUploadID is a job id (cmd/api newID: 8 hex). A fixed dataset id has a '-', so the two never meet.
 var (
@@ -95,11 +118,25 @@ func (s *JobService) CreateUpload(ctx context.Context, req model.UploadRequest) 
 			return model.UploadTicket{}, invalid("duplicate file: " + name)
 		}
 		seen[name] = true
-		if f.Size < 0 || f.Size > maxPutBytes {
-			return model.UploadTicket{}, invalid(fmt.Sprintf("%s: size must be 0 ~ %d bytes", f.Path, int64(maxPutBytes)))
+		if f.Size < 0 || (len(f.Parts) == 0 && f.Size > maxPutBytes) {
+			return model.UploadTicket{}, invalid(fmt.Sprintf("%s: size must be 0 ~ %d bytes for one PUT (send parts)", f.Path, int64(maxPutBytes)))
 		}
 		if !validSHA256.MatchString(f.SHA256) {
 			return model.UploadTicket{}, invalid(f.Path + ": sha256 must be 64 lowercase hex characters")
+		}
+		if len(f.Parts) > 0 {
+			if req.PartBytes < minPartBytes || req.PartBytes > maxPartBytes {
+				return model.UploadTicket{}, invalid(fmt.Sprintf("partBytes must be %d ~ %d for a multipart file", int64(minPartBytes), int64(maxPartBytes)))
+			}
+			n := int((f.Size + req.PartBytes - 1) / req.PartBytes)
+			if f.Size <= req.PartBytes || len(f.Parts) != n || n > maxParts {
+				return model.UploadTicket{}, invalid(fmt.Sprintf("%s: %d bytes in %d-byte parts is %d parts (a file of one part is a single PUT)", f.Path, f.Size, req.PartBytes, n))
+			}
+			for _, sum := range f.Parts {
+				if !validSHA256.MatchString(sum) {
+					return model.UploadTicket{}, invalid(f.Path + ": part sha256 must be 64 lowercase hex characters")
+				}
+			}
 		}
 		switch field {
 		case "model":
@@ -140,6 +177,29 @@ func (s *JobService) CreateUpload(ctx context.Context, req model.UploadRequest) 
 	id := s.cfg.NewID()
 	prefix := datasetPrefix(id, datasetVersion)
 	now := s.cfg.Now().UTC()
+
+	state := uploadState{PartBytes: req.PartBytes, Multipart: map[string]multipartFile{}}
+	for _, f := range req.Files {
+		if len(f.Parts) == 0 {
+			continue
+		}
+		field, path, _ := strings.Cut(f.Path, "/")
+		name, _, _ := entryName(field, path)
+		uploadID, err := s.objects.CreateMultipart(ctx, prefix+name)
+		if err != nil {
+			return model.UploadTicket{}, upstream("start multipart "+name, err)
+		}
+		state.Multipart[name] = multipartFile{UploadID: uploadID, Parts: f.Parts}
+	}
+	if len(state.Multipart) > 0 {
+		b, err := json.Marshal(state)
+		if err != nil {
+			return model.UploadTicket{}, fmt.Errorf("encode upload state: %w", err)
+		}
+		if err := s.objects.Put(ctx, prefix+uploadStateName, bytes.NewReader(b)); err != nil {
+			return model.UploadTicket{}, upstream("upload "+uploadStateName, err)
+		}
+	}
 	manifestBytes, err := json.MarshalIndent(model.DatasetManifest{
 		SchemaVersion: manifestSchema, JobID: id, Model: folder, Format: s.cfg.Settings.Training.DatasetFormat,
 		Files: entries, ModelBytes: modelBytes, DataBytes: dataBytes, CreatedAt: now.Format(time.RFC3339),
@@ -160,13 +220,27 @@ func (s *JobService) CreateUpload(ctx context.Context, req model.UploadRequest) 
 		field, path, _ := strings.Cut(f.Path, "/")
 		name, _, _ := entryName(field, path)
 		e := byName[name]
+		if mp, ok := state.Multipart[name]; ok {
+			t := model.UploadTarget{Path: f.Path}
+			for i, sum := range mp.Parts {
+				size := partSize(e.SizeBytes, req.PartBytes, i)
+				url, headers, err := s.objects.PresignUploadPart(ctx, prefix+name, mp.UploadID, int32(i+1), size, sum, UploadURLTTL)
+				if err != nil {
+					return model.UploadTicket{}, upstream("presign "+name, err)
+				}
+				t.Parts = append(t.Parts, model.UploadPartTarget{Number: int32(i + 1), Size: size, URL: url, Headers: headers})
+			}
+			targets = append(targets, t)
+			continue
+		}
 		url, headers, err := s.objects.PresignPut(ctx, prefix+name, e.SizeBytes, e.SHA256, UploadURLTTL)
 		if err != nil {
 			return model.UploadTicket{}, upstream("presign "+name, err)
 		}
 		targets = append(targets, model.UploadTarget{Path: f.Path, URL: url, Headers: headers})
 	}
-	slog.Info("upload created", "id", id, "model", folder, "files", len(entries), "modelBytes", modelBytes, "dataBytes", dataBytes)
+	slog.Info("upload created", "id", id, "model", folder, "files", len(entries), "multipart", len(state.Multipart),
+		"modelBytes", modelBytes, "dataBytes", dataBytes)
 	return model.UploadTicket{ID: id, ExpiresAt: now.Add(UploadURLTTL), Files: targets}, nil
 }
 
@@ -200,7 +274,21 @@ func (s *JobService) uploadedDataset(ctx context.Context, id string, src UploadS
 	if err := json.Unmarshal(raw, &m); err != nil || m.JobID != id {
 		return datasetInput{}, bad("업로드 manifest.json을 읽을 수 없습니다")
 	}
+	var state uploadState
+	if b, _, err := s.objects.Get(ctx, prefix+uploadStateName, maxMetadataBytes); err == nil {
+		if err := json.Unmarshal(b, &state); err != nil {
+			return datasetInput{}, bad("업로드 upload.json을 읽을 수 없습니다")
+		}
+	} else if !errors.Is(err, model.ErrNotFound) {
+		return datasetInput{}, upstream("read upload state", err)
+	}
 	for _, e := range m.Files {
+		if mp, ok := state.Multipart[e.Name]; ok {
+			if err := s.completeMultipart(ctx, prefix+e.Name, e, mp, state.PartBytes); err != nil {
+				return datasetInput{}, err
+			}
+			continue
+		}
 		h, err := s.objects.Head(ctx, prefix+e.Name)
 		if errors.Is(err, model.ErrNotFound) {
 			return datasetInput{}, bad(e.Name + "이(가) 아직 올라가지 않았습니다")
@@ -219,4 +307,46 @@ func (s *JobService) uploadedDataset(ctx context.Context, id string, src UploadS
 	return datasetInput{id: id, version: datasetVersion, prefix: prefix, modelName: m.Model,
 		modelBytes: m.ModelBytes, dataBytes: m.DataBytes, modelFiles: modelFiles(m.Files), train: train,
 		manifestSHA: sha256Hex(raw)}, nil
+}
+
+// completeMultipart finishes a multipart file once every part is in S3 with its signed checksum. A file already
+// completed (an earlier submission failed later on) only has its size checked: its parts were checked then.
+func (s *JobService) completeMultipart(ctx context.Context, key string, e model.ManifestEntry, mp multipartFile, partBytes int64) error {
+	bad := func(msg string) error {
+		return invalidFields([]model.FieldError{{Field: "upload", Message: e.Name + msg}})
+	}
+	if h, err := s.objects.Head(ctx, key); err == nil {
+		if h.Size != e.SizeBytes {
+			return bad("의 크기가 업로드 목록과 다릅니다")
+		}
+		return nil
+	} else if !errors.Is(err, model.ErrNotFound) {
+		return upstream("check "+e.Name, err)
+	}
+	parts, err := s.objects.ListParts(ctx, key, mp.UploadID)
+	if errors.Is(err, model.ErrNotFound) {
+		return bad("의 multipart 업로드가 없습니다 (만료 · 취소)")
+	}
+	if err != nil {
+		return upstream("list parts "+e.Name, err)
+	}
+	byNumber := map[int32]model.UploadedPart{}
+	for _, p := range parts {
+		byNumber[p.Number] = p
+	}
+	done := make([]model.UploadedPart, 0, len(mp.Parts))
+	for i, sum := range mp.Parts {
+		p, ok := byNumber[int32(i+1)]
+		if !ok {
+			return bad(fmt.Sprintf("이(가) 아직 다 올라가지 않았습니다 (조각 %d/%d)", len(byNumber), len(mp.Parts)))
+		}
+		if p.SHA256 != sum || p.Size != partSize(e.SizeBytes, partBytes, i) {
+			return bad(fmt.Sprintf("의 조각 %d이(가) 업로드 목록과 다릅니다 (크기 · sha256)", i+1))
+		}
+		done = append(done, p)
+	}
+	if err := s.objects.CompleteMultipart(ctx, key, mp.UploadID, done); err != nil {
+		return upstream("complete multipart "+e.Name, err)
+	}
+	return nil
 }

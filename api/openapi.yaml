@@ -63,7 +63,8 @@ paths:
 
         1. 파일 목록(경로 · 크기 · sha256 hex)을 보낸다. 경로 규칙 · 상한 · 필수 파일은 `POST /api/jobs` multipart 파트 이름과 같다(`model/<폴더>/<경로>`, `data/<파일>.jsonl`, `train/<파일>.py`).
         2. Backend가 `datasets/{id}/v1/manifest.json`을 쓰고 파일마다 presigned PUT URL을 돌려준다. URL에 크기와 sha256이 서명되어 있어 S3가 다른 내용은 거절한다. `headers`는 PUT에 그대로 넣는다.
-        3. 모든 PUT이 끝나면 `POST /api/jobs`에 spec `upload: {id}`만 보낸다(파일 파트 없음). 작업 id는 이 업로드 id가 된다.
+           큰 파일은 multipart: 요청에 `partBytes`(5MiB~512MiB)와 그 파일의 `parts`(조각마다 sha256)를 넣으면 S3 multipart upload를 시작하고 조각마다 URL(`parts[]`)을 준다. 조각은 순서 · 동시성 상관없이 PUT하고, 실패한 조각만 다시 보내면 된다. S3가 조각마다 sha256을 검증한다(파일 전체 sha256은 manifest에 들어가 ckpt-init이 받을 때 검증).
+        3. 모든 PUT이 끝나면 `POST /api/jobs`에 spec `upload: {id}`만 보낸다(파일 파트 없음). Backend가 multipart 파일을 조각 목록 · sha256 확인 뒤 완료(CompleteMultipartUpload)한다. 작업 id는 이 업로드 id가 된다.
 
         URL은 1시간(또는 Backend Roles Anywhere 세션 만료) 안에 PUT을 시작해야 한다. 제출하지 않은 업로드의 객체는 남는다.
       requestBody:
@@ -504,6 +505,7 @@ components:
       additionalProperties: false
       required: [files]
       properties:
+        partBytes: { type: integer, format: int64, description: "multipart 조각 크기 (5MiB~512MiB). parts가 있는 파일이 있으면 필수", example: 67108864 }
         files:
           type: array
           items:
@@ -514,6 +516,10 @@ components:
               path: { type: string, description: "`model/<폴더>/<경로>`, `data/<파일>.jsonl` 또는 `train/<파일>.py`", example: model/gpt2/config.json }
               size: { type: integer, format: int64, example: 665 }
               sha256: { type: string, description: 파일 내용의 SHA-256 (소문자 hex 64자), example: 0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9 }
+              parts:
+                type: array
+                items: { type: string }
+                description: "multipart로 올릴 때 조각마다 SHA-256 hex. 조각 i = [i·partBytes, (i+1)·partBytes). 개수 = ⌈size/partBytes⌉ (2개 이상)"
     UploadTicket:
       type: object
       required: [id, expiresAt, files]
@@ -524,7 +530,8 @@ components:
           type: array
           items:
             type: object
-            required: [path, url, headers]
+            required: [path]
+            description: 한 번 PUT(url · headers) 또는 multipart(parts) 중 하나
             properties:
               path: { type: string, example: model/gpt2/config.json }
               url: { type: string, description: presigned PUT URL (S3) }
@@ -532,6 +539,16 @@ components:
                 type: object
                 additionalProperties: { type: string }
                 description: "PUT에 그대로 넣을 헤더 (`x-amz-checksum-sha256`)"
+              parts:
+                type: array
+                items:
+                  type: object
+                  required: [number, size, url, headers]
+                  properties:
+                    number: { type: integer, example: 1 }
+                    size: { type: integer, format: int64, example: 67108864 }
+                    url: { type: string, description: presigned UploadPart URL }
+                    headers: { type: object, additionalProperties: { type: string } }
     SubmitSpec:
       type: object
       additionalProperties: false
