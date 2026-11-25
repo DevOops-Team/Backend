@@ -38,6 +38,11 @@ type ObjectStore interface {
 	// Presign returns a GET URL valid for ttl that saves the object as filename (model downloads). It does
 	// not check that the object exists.
 	Presign(ctx context.Context, key, filename string, ttl time.Duration) (string, error)
+	// PresignPut returns a PUT URL valid for ttl and the headers the PUT must send. The SHA-256 (hex) is signed
+	// into it, so S3 rejects any other body (GPU-278).
+	PresignPut(ctx context.Context, key string, size int64, sha256 string, ttl time.Duration) (string, map[string]string, error)
+	// Head returns the object's size and SHA-256 checksum, or model.ErrNotFound.
+	Head(ctx context.Context, key string) (model.ObjectHead, error)
 	// DeleteAll permanently removes every object under prefix, including old versions and delete markers
 	// (the bucket is versioned). Nothing under the prefix is not an error.
 	DeleteAll(ctx context.Context, prefix string) error
@@ -240,9 +245,13 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 
 	id := s.cfg.NewID()
 	var ds datasetInput
-	if spec.Dataset != nil {
+	switch {
+	case spec.Dataset != nil:
 		ds, err = s.fixedDataset(ctx, *spec.Dataset, src)
-	} else {
+	case spec.Upload != nil:
+		id = spec.Upload.ID // the job is the upload: its dataset datasets/<id>/v1/ goes when the job is deleted
+		ds, err = s.uploadedDataset(ctx, id, src)
+	default:
 		ds, err = s.uploadDataset(ctx, id, src)
 	}
 	if err != nil {
@@ -462,35 +471,26 @@ func (s *JobService) receive(ctx context.Context, prefix string, src UploadSourc
 			return received{}, tooLarge(fmt.Sprintf("too many files: at most %d", lim.MaxFiles))
 		}
 
-		var name string
+		name, folder, err := entryName(u.Field, u.Path)
+		if err != nil {
+			return received{}, err
+		}
 		var budget int64
 		switch u.Field {
 		case "model":
-			folder, rest, ok := splitModelPath(u.Path)
-			if !ok {
-				return received{}, invalid("model file path must be <folder>/<file>: " + u.Path)
-			}
 			if r.modelName == "" {
 				r.modelName = folder
 			} else if folder != r.modelName {
 				return received{}, invalid("model files come from more than one folder: " + r.modelName + ", " + folder)
 			}
-			name, budget = "model/"+rest, lim.MaxModelBytes-r.modelBytes
+			budget = lim.MaxModelBytes - r.modelBytes
 		case "data":
-			if !safeName(u.Path) || !strings.HasSuffix(u.Path, ".jsonl") {
-				return received{}, invalid("training data must be .jsonl files: " + u.Path)
-			}
-			name, budget = "data/"+u.Path, lim.MaxDataBytes-r.dataBytes
+			budget = lim.MaxDataBytes - r.dataBytes
 		case "train":
-			if !safeName(u.Path) || !strings.HasSuffix(u.Path, ".py") {
-				return received{}, invalid("training code must be one .py file: " + u.Path)
-			}
 			if seen[trainName] {
 				return received{}, invalid("only one training code file (train.py) can be uploaded")
 			}
-			name, budget = trainName, MaxTrainBytes
-		default:
-			return received{}, invalid("unknown upload field: " + u.Field)
+			budget = MaxTrainBytes
 		}
 		if seen[name] {
 			return received{}, invalid("duplicate file: " + name)
@@ -638,6 +638,14 @@ func (s *JobService) validate(spec model.SubmitSpec) (string, string, settings.D
 	}
 	merged, hfields := mergeHyperparameters(tr, spec.Hyperparameters)
 	fields = append(fields, hfields...)
+	if u := spec.Upload; u != nil {
+		if spec.Dataset != nil {
+			bad("upload", "dataset과 upload는 함께 쓸 수 없습니다")
+		}
+		if !validUploadID.MatchString(u.ID) {
+			bad("upload.id", "POST /api/uploads가 돌려준 id여야 합니다")
+		}
+	}
 	if d := spec.Dataset; d != nil {
 		if !validName.MatchString(d.ID) || !strings.Contains(d.ID, "-") {
 			bad("dataset.id", "고정 데이터셋 이름: 소문자 · 숫자 · '-', '-'를 1개 이상 포함 (예: smollm2-wikitext2)")

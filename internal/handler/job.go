@@ -58,6 +58,27 @@ func (h *jobHandler) create(c *gin.Context) {
 	c.JSON(http.StatusCreated, created)
 }
 
+// maxUploadRequestBytes caps POST /api/uploads: a file list (at most limits.max_files entries), not files.
+const maxUploadRequestBytes = 1 << 20
+
+// createUpload handles POST /api/uploads (GPU-278): the browser gets presigned PUT URLs and uploads the
+// files straight to S3, then submits POST /api/jobs with spec.upload.id and no file parts.
+func (h *jobHandler) createUpload(c *gin.Context) {
+	dec := json.NewDecoder(io.LimitReader(c.Request.Body, maxUploadRequestBytes))
+	dec.DisallowUnknownFields()
+	var req model.UploadRequest
+	if err := dec.Decode(&req); err != nil {
+		bad(c, "invalid upload JSON: "+err.Error())
+		return
+	}
+	ticket, err := h.jobs.CreateUpload(c.Request.Context(), req)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, ticket)
+}
+
 // partSource turns multipart parts into uploads. The path rides in the form name, because
 // Part.FileName() keeps only the base name and a model folder has subdirectories.
 type partSource struct {
