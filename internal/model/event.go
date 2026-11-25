@@ -37,5 +37,10 @@ type SubmittedEvent struct {
 	ConfigSHA256 string
 	ImageDigest  string // trainer image digest, "" when the image is not pinned
 	ExpID        string // experiment the job belongs to (잡 투입기, GPU-172); "" outside an experiment
+	// The submitted original (GPU-271): SHA-256 (lowercase hex) of the code/<id>/jobset.json bytes put in S3,
+	// the same value as the fencing item's jobset_sha256, and that object's s3:// URI. The recovery controller
+	// reads them from job.lifecycle instead of asking the backend at fault time.
+	JobsetSHA256 string
+	JobsetURI    string
 	OccurredAt   time.Time
 }

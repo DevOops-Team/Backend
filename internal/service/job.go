@@ -303,7 +303,8 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 		}
 	}
 
-	if err := s.fencing.Create(ctx, id, sha256Hex(jobsetBytes)); err != nil {
+	jobsetSHA := sha256Hex(jobsetBytes) // fencing item and job.submitted carry the same hash of the stored bytes
+	if err := s.fencing.Create(ctx, id, jobsetSHA); err != nil {
 		if errors.Is(err, model.ErrAlreadyExists) {
 			return model.CreatedJob{}, &Error{Kind: KindConflict, Msg: "job " + id + " already has a fencing item", Err: err}
 		}
@@ -320,6 +321,7 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 	s.report(ctx, model.SubmittedEvent{
 		JobID: id, Generation: firstGeneration, JobsetName: js.GetName(), GPUs: spec.GPUs, Strategy: strategy,
 		Queue: queue, ConfigSHA256: configSHA, ImageDigest: digestOf(s.cfg.Settings.Images.Trainer), ExpID: spec.ExpID,
+		JobsetSHA256: jobsetSHA, JobsetURI: fmt.Sprintf("s3://%s/%s", s.cfg.Bucket, s.jobsetKey(id)),
 		OccurredAt: now,
 	})
 

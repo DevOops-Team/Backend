@@ -42,6 +42,13 @@ type noFencing struct{}
 func (noFencing) Create(context.Context, string, string) error          { return nil }
 func (noFencing) Restart(context.Context, string, int, time.Time) error { return nil }
 
+type capturedLifecycle struct{ got *[]model.SubmittedEvent }
+
+func (c capturedLifecycle) Submitted(_ context.Context, e model.SubmittedEvent) error {
+	*c.got = append(*c.got, e)
+	return nil
+}
+
 type noLifecycle struct{}
 
 func (noLifecycle) Submitted(context.Context, model.SubmittedEvent) error { return nil }
@@ -350,16 +357,21 @@ func TestSubmitRecordsTheHashOfTheStoredJobsetJSON(t *testing.T) {
 	}
 	objs := fakeObjects{fixedPrefix + "manifest.json": fixedManifest(t, nil), fixedPrefix + "code/train.py": fixedTrain}
 	var digest string
+	var events []model.SubmittedEvent
 	svc := NewJobService(Config{Namespace: "training", Region: "us-east-2", Bucket: "ckpt",
 		Settings: cfg.WithImages("ghcr.io/x/trainer:1", "ghcr.io/x/checkpoint:1"),
 		NewID:    func() string { return "a1b2c3d4" }},
 		Deps{Objects: bucketObjects{objs}, Scheduler: &submitted{}, Fencing: digestFencing{got: &digest},
-			Lifecycle: noLifecycle{}, Record: noRecord{}})
+			Lifecycle: capturedLifecycle{&events}, Record: noRecord{}})
 	if _, err := svc.Submit(context.Background(), fixedSpec(), &parts{}); err != nil {
 		t.Fatal(err)
 	}
 	stored, ok := objs["code/a1b2c3d4/jobset.json"]
 	if !ok || digest == "" || digest != hexSum(stored) {
 		t.Errorf("recorded %q, stored jobset.json hashes to %q", digest, hexSum(stored))
+	}
+	// job.submitted carries the same hash and where the original is (GPU-271)
+	if len(events) != 1 || events[0].JobsetSHA256 != digest || events[0].JobsetURI != "s3://ckpt/code/a1b2c3d4/jobset.json" {
+		t.Errorf("job.submitted = %+v, want jobset_sha256 %s and the S3 URI", events, digest)
 	}
 }

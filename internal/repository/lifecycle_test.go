@@ -90,3 +90,26 @@ func TestSubmittedPayloadLeavesExperimentIDOutWhenNotGiven(t *testing.T) {
 		t.Errorf("payload.exp_id = %v, want no key for a job outside an experiment", got.Payload["exp_id"])
 	}
 }
+
+// GPU-271: the recovery controller takes the submitted original's hash from job.submitted, not the backend API.
+func TestSubmittedPayloadCarriesTheJobsetHash(t *testing.T) {
+	digest := "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+	_, body, err := submittedRecord(model.SubmittedEvent{JobID: "x", Generation: 1, JobsetSHA256: digest,
+		JobsetURI: "s3://ckpt/code/x/jobset.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Payload map[string]any `json:"payload"`
+	}
+	_ = json.Unmarshal(body, &got)
+	if got.Payload["jobset_sha256"] != digest || got.Payload["jobset_uri"] != "s3://ckpt/code/x/jobset.json" {
+		t.Errorf("payload = %v, want jobset_sha256 and jobset_uri", got.Payload)
+	}
+	_, body, _ = submittedRecord(model.SubmittedEvent{JobID: "x", Generation: 1})
+	got.Payload = nil
+	_ = json.Unmarshal(body, &got)
+	if _, ok := got.Payload["jobset_sha256"]; ok {
+		t.Error("no hash known: leave the keys out rather than send an empty hash")
+	}
+}
