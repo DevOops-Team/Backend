@@ -55,7 +55,7 @@ Frontend ◀── 폴링 ── Backend ◀── 데이터 DB v_job_status (ba
 |---|---|---|
 | `S3_BUCKET` | (필수) | 체크포인트 버킷 하나에 code · datasets · jobs (ADR-14) |
 | `FENCING_TABLE` | `devoops-prod-fencing` | 세대 · owner · 승인본 (ADR-6) |
-| `KAFKA_BOOTSTRAP` | 비어 있음 | `job.lifecycle` 브로커. Backend가 job.submitted를 보낸다(collector가 DB에 저장). 비우면 안 보냄. JobSet의 ckpt-sidecar에도 넘김 |
+| `KAFKA_BOOTSTRAP` | 비어 있음 | `job.lifecycle` 브로커. Backend가 job.submitted를 보낸다(collector가 DB에 저장, payload `jobset_sha256` · `jobset_uri`는 복구 컨트롤러가 제출 원본 확인에 씀, GPU-271). 비우면 안 보냄. JobSet의 ckpt-sidecar에도 넘김 |
 | `KAFKA_TOPIC_LIFECYCLE` | `job.lifecycle` | |
 | `PGHOST` · `PGPORT` · `PGDATABASE` · `PGUSER` · `PGPASSWORD` · `PGSSLMODE` | 비어 있음 | 데이터 DB(`gpuf_data`, 계정 `backend_ro`, Data `db/004`). 화면 상태 · 진행률 · 타임라인을 읽는다. `PGHOST`를 비우면 관리 클러스터 상태만. DB 장애 때도 목록은 관리 클러스터 상태로 나온다 |
 | `TRAINER_IMAGE` | (필수) | `ghcr.io/devoops-team/trainer@sha256:…` (Data 레포 `trainer/`, 봇이 Gitops에 digest) |

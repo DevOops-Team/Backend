@@ -91,6 +91,10 @@ func submittedRecord(e model.SubmittedEvent) (string, []byte, error) {
 	if e.ExpID != "" { // collector: job_runs.exp_id (GPU-172)
 		payload["exp_id"] = e.ExpID
 	}
+	if e.JobsetSHA256 != "" { // recovery controller: the submitted original (GPU-271)
+		payload["jobset_sha256"] = e.JobsetSHA256
+		payload["jobset_uri"] = e.JobsetURI
+	}
 	body, err := json.Marshal(envelope{
 		EventID:       fmt.Sprintf("submitted-%s-g%04d", e.JobID, e.Generation),
 		SchemaVersion: 1,
