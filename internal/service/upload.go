@@ -311,20 +311,22 @@ func (s *JobService) uploadedDataset(ctx context.Context, id string, src UploadS
 
 // completeMultipart finishes a multipart file once every part is in S3 with its signed checksum. A file already
 // completed (an earlier submission failed later on) only has its size checked: its parts were checked then.
+//
+// ListParts comes first: before completion the object does not exist, and HeadObject of a missing key is 403, not
+// 404, for the backend role (no s3:ListBucket on datasets/). Only when the upload is gone is the object read.
 func (s *JobService) completeMultipart(ctx context.Context, key string, e model.ManifestEntry, mp multipartFile, partBytes int64) error {
 	bad := func(msg string) error {
 		return invalidFields([]model.FieldError{{Field: "upload", Message: e.Name + msg}})
 	}
-	if h, err := s.objects.Head(ctx, key); err == nil {
-		if h.Size != e.SizeBytes {
-			return bad("의 크기가 업로드 목록과 다릅니다")
-		}
-		return nil
-	} else if !errors.Is(err, model.ErrNotFound) {
-		return upstream("check "+e.Name, err)
-	}
 	parts, err := s.objects.ListParts(ctx, key, mp.UploadID)
 	if errors.Is(err, model.ErrNotFound) {
+		h, herr := s.objects.Head(ctx, key)
+		if herr == nil {
+			if h.Size != e.SizeBytes {
+				return bad("의 크기가 업로드 목록과 다릅니다")
+			}
+			return nil // completed by an earlier submission
+		}
 		return bad("의 multipart 업로드가 없습니다 (만료 · 취소)")
 	}
 	if err != nil {
