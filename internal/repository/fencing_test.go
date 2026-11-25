@@ -15,20 +15,10 @@ import (
 )
 
 type fakeFencingDB struct {
-	got    *dynamodb.UpdateItemInput
-	put    *dynamodb.PutItemInput
-	read   *dynamodb.GetItemInput
-	stored map[string]types.AttributeValue // GetItem answers this item (nil = no item)
-	old    map[string]types.AttributeValue // set: the condition fails with this item
-	fail   error
-}
-
-func (f *fakeFencingDB) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
-	f.read = in
-	if f.fail != nil {
-		return nil, f.fail
-	}
-	return &dynamodb.GetItemOutput{Item: f.stored}, nil
+	got  *dynamodb.UpdateItemInput
+	put  *dynamodb.PutItemInput
+	old  map[string]types.AttributeValue // set: the condition fails with this item
+	fail error
 }
 
 func (f *fakeFencingDB) PutItem(_ context.Context, in *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
@@ -123,29 +113,5 @@ func TestCreateRecordsTheJobsetHashWithGenerationOne(t *testing.T) {
 	}
 	if *db.put.ConditionExpression != "attribute_not_exists(job_id)" {
 		t.Errorf("condition = %s", *db.put.ConditionExpression)
-	}
-}
-
-func TestJobsetSHA256ReadsTheRecordedHashConsistently(t *testing.T) {
-	stored := map[string]types.AttributeValue{"job_id": &types.AttributeValueMemberS{Value: "aa11"},
-		JobsetSHA256Attr: &types.AttributeValueMemberS{Value: testDigest}}
-	db := &fakeFencingDB{stored: stored}
-	f := &Fencing{db: db, table: "fencing"}
-	got, err := f.JobsetSHA256(t.Context(), "aa11")
-	if err != nil || got != testDigest {
-		t.Fatalf("JobsetSHA256 = %q, %v", got, err)
-	}
-	if !*db.read.ConsistentRead || db.read.Key["job_id"].(*types.AttributeValueMemberS).Value != "aa11" {
-		t.Errorf("read = %+v", db.read)
-	}
-
-	// An item from before GPU-119 has no hash: "" (the service answers 422), not "no item".
-	db.stored = map[string]types.AttributeValue{"job_id": &types.AttributeValueMemberS{Value: "aa11"}}
-	if got, err := f.JobsetSHA256(t.Context(), "aa11"); err != nil || got != "" {
-		t.Errorf("item without hash = %q, %v", got, err)
-	}
-	db.stored = nil
-	if _, err := f.JobsetSHA256(t.Context(), "aa11"); !errors.Is(err, model.ErrNotFound) {
-		t.Errorf("no item = %v, want ErrNotFound", err)
 	}
 }

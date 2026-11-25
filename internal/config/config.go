@@ -27,9 +27,6 @@ type Config struct {
 	// so a new image needs no backend build. Empty = the settings file value.
 	TrainerImage    string
 	CheckpointImage string
-	// RECOVERY_API_TOKEN: bearer token of the internal recovery API (GPU-119), from a Secret. Empty = that
-	// API answers 503 NOT_CONFIGURED; the rest of the server works as before.
-	RecoveryAPIToken string
 }
 
 // Load reads the configuration through getenv (os.Getenv in main, a map in tests).
@@ -56,8 +53,6 @@ func Load(getenv func(string) string) (Config, error) {
 
 		TrainerImage:    getenv("TRAINER_IMAGE"),
 		CheckpointImage: getenv("CHECKPOINT_IMAGE"),
-
-		RecoveryAPIToken: getenv("RECOVERY_API_TOKEN"),
 	}
 	if cfg.Bucket == "" {
 		return Config{}, errors.New("S3_BUCKET is required")
