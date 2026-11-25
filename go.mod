@@ -9,6 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.23.17
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.72.1
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.5
+	github.com/aws/smithy-go v1.28.6
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/twmb/franz-go v1.20.6
@@ -32,7 +33,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.38.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.5 // indirect
-	github.com/aws/smithy-go v1.28.6 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic v1.15.0 // indirect
 	github.com/bytedance/sonic/loader v0.5.0 // indirect

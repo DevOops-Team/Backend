@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 
 	"github.com/DevOops-Team/Backend/internal/model"
 )
@@ -21,6 +24,7 @@ type s3Reader interface {
 	s3.ListObjectsV2APIClient
 	s3.ListObjectVersionsAPIClient
 	GetObject(ctx context.Context, in *s3.GetObjectInput, opts ...func(*s3.Options)) (*s3.GetObjectOutput, error)
+	HeadObject(ctx context.Context, in *s3.HeadObjectInput, opts ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
 	DeleteObjects(ctx context.Context, in *s3.DeleteObjectsInput, opts ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error)
 }
 
@@ -96,6 +100,51 @@ func (o *Objects) Presign(ctx context.Context, key, filename string, ttl time.Du
 		return "", err
 	}
 	return req.URL, nil
+}
+
+// PresignPut signs a PUT the browser sends straight to S3 (GPU-278). Content-Length and x-amz-checksum-sha256
+// are signed headers: S3 refuses another size, and refuses a body whose SHA-256 is not the given one. Like
+// Presign, the URL also stops working when the backend's Roles Anywhere session expires; S3 checks the
+// signature when the upload starts.
+func (o *Objects) PresignPut(ctx context.Context, key string, size int64, sha256Hex string, ttl time.Duration) (string, map[string]string, error) {
+	sum, err := hex.DecodeString(sha256Hex)
+	if err != nil || len(sum) != 32 {
+		return "", nil, fmt.Errorf("sha256 must be 64 hex characters")
+	}
+	b64 := base64.StdEncoding.EncodeToString(sum)
+	req, err := o.presigner.PresignPutObject(ctx, &s3.PutObjectInput{
+		Bucket:         aws.String(o.bucket),
+		Key:            aws.String(key),
+		ContentLength:  aws.Int64(size),
+		ChecksumSHA256: aws.String(b64),
+	}, s3.WithPresignExpires(ttl))
+	if err != nil {
+		return "", nil, err
+	}
+	// The browser sets Host and Content-Length itself; it only has to send the checksum header.
+	return req.URL, map[string]string{"x-amz-checksum-sha256": b64}, nil
+}
+
+// Head reads the size and the full-object SHA-256 checksum (single PUT with x-amz-checksum-sha256).
+func (o *Objects) Head(ctx context.Context, key string) (model.ObjectHead, error) {
+	res, err := o.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(o.bucket), Key: aws.String(key),
+		ChecksumMode: types.ChecksumModeEnabled})
+	var missing *types.NotFound
+	if errors.As(err, &missing) {
+		return model.ObjectHead{}, model.ErrNotFound
+	}
+	var api smithy.APIError
+	if errors.As(err, &api) && api.ErrorCode() == "NotFound" {
+		return model.ObjectHead{}, model.ErrNotFound
+	}
+	if err != nil {
+		return model.ObjectHead{}, err
+	}
+	h := model.ObjectHead{Size: aws.ToInt64(res.ContentLength)}
+	if sum, err := base64.StdEncoding.DecodeString(aws.ToString(res.ChecksumSHA256)); err == nil && len(sum) == 32 {
+		h.SHA256 = hex.EncodeToString(sum)
+	}
+	return h, nil
 }
 
 // deleteBatch is the most keys one DeleteObjects call takes.

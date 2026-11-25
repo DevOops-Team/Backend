@@ -218,6 +218,14 @@ type SubmitSpec struct {
 	// instead of file parts (GPU-200): the 잡 투입기 sends the same model · data · train.py for every job
 	// of an experiment, so it is put there once. With it the request has no file parts.
 	Dataset *SpecDataset `json:"dataset,omitempty"`
+	// Upload submits files the browser already PUT straight to S3 with POST /api/uploads URLs (GPU-278):
+	// the job takes the upload's id, and the request has no file parts.
+	Upload *SpecUpload `json:"upload,omitempty"`
+}
+
+// SpecUpload names a POST /api/uploads upload (datasets/<id>/v1/, id = the job id it becomes).
+type SpecUpload struct {
+	ID string `json:"id"`
 }
 
 // SpecDataset names a fixed dataset. Its id has a '-' so it never looks like a job ID: a job's own
