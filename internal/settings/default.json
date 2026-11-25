@@ -65,5 +65,8 @@
     "max_model_bytes": 2147483648,
     "max_data_bytes": 1073741824,
     "max_files": 200
+  },
+  "named_datasets": {
+    "devoops": { "id": "qwen25-14b-wikitext103", "version": 1 }
   }
 }

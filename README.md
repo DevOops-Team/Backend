@@ -19,7 +19,7 @@ Frontend ◀── 폴링 ── Backend ◀── 데이터 DB v_job_status (ba
 
 | 메서드 · 경로 | 내용 |
 |---|---|
-| `GET /api/training/options` | 방식 · GPU 범위 · 하이퍼파라미터 기본값과 범위 · 업로드 상한 · 체크포인트 계산 기본값 |
+| `GET /api/training/options` | 방식 · GPU 범위 · 하이퍼파라미터 기본값과 범위 · 업로드 상한 · 체크포인트 계산 기본값 · `namedDatasets`(학습 이름 → S3 고정 데이터셋, 설정 `named_datasets`. 화면에서 그 이름을 적으면 파일 없이 `spec.dataset`으로 제출, GPU-160. 기본 `devoops` → `qwen25-14b-wikitext103` v1) |
 | `POST /api/jobs` | multipart. 첫 파트 `spec`(JSON), 이어서 `model/<폴더>/<경로>` 파일들(`config.json` 필수), `data/<파일>.jsonl` 1개 이상, `train/<파일>.py` 정확히 1개(최대 1MiB, `/data/code/train.py`로 주입). 경로는 파트 **이름**에 넣는다 |
 | `GET /api/jobs` · `/api/jobs/{id}` | 관리 클러스터 JobSet + 데이터 DB `v_job_status`의 상태 · 진행률 · 마지막 승인 체크포인트 |
 | `GET /api/jobs/{id}/events` | 타임라인: 데이터 DB `job_runs` · `checkpoints`(세대별 제출 · 시작 · 종료, 승인 체크포인트) + 관리 클러스터 Event (메모리) |

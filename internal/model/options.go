@@ -12,6 +12,15 @@ type TrainingOptions struct {
 	Hyperparameters []HyperparameterDef `json:"hyperparameters"`
 	Limits          UploadLimits        `json:"limits"`
 	Checkpoint      CheckpointDefaults  `json:"checkpoint"`
+	// NamedDatasets: a training name that submits with a fixed dataset in S3 instead of uploads (GPU-160).
+	// The screen skips the model · data · train.py steps and sends spec.dataset {id, version}.
+	NamedDatasets []NamedDataset `json:"namedDatasets"`
+}
+
+type NamedDataset struct {
+	Name    string `json:"name"`
+	ID      string `json:"id"`
+	Version int    `json:"version"`
 }
 
 type StrategyOption struct {

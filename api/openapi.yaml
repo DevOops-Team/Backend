@@ -496,7 +496,7 @@ components:
 
     TrainingOptions:
       type: object
-      required: [strategies, defaultStrategy, finetunes, defaultFinetune, gpus, datasetFormat, hyperparameters, limits, checkpoint]
+      required: [strategies, defaultStrategy, finetunes, defaultFinetune, gpus, datasetFormat, hyperparameters, limits, checkpoint, namedDatasets]
       properties:
         strategies:
           type: array
@@ -519,6 +519,16 @@ components:
               strategies: { type: array, items: { type: string }, example: [fsdp] }
               lora: { $ref: "#/components/schemas/Lora" }
         defaultFinetune: { type: string, example: full }
+        namedDatasets:
+          type: array
+          description: "학습 이름 → S3 고정 데이터셋 (GPU-160). 화면에서 이 이름을 적으면 모델 · 데이터 · 학습 코드 단계를 건너뛰고 파일 없이 spec.dataset {id, version}으로 제출한다. 브라우저로 올리기엔 큰 모델(14B)용"
+          items:
+            type: object
+            required: [name, id, version]
+            properties:
+              name: { type: string, example: devoops }
+              id: { type: string, example: qwen25-14b-wikitext103 }
+              version: { type: integer, example: 1 }
         gpus: { $ref: "#/components/schemas/GPURange" }
         datasetFormat: { type: string, example: text-jsonl }
         hyperparameters:
