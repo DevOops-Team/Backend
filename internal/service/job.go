@@ -70,8 +70,8 @@ type JobRecords interface {
 
 // Fencing writes the backend's part of the fencing table (DynamoDB).
 type Fencing interface {
-	// Create writes the job's first item with the SHA-256 of its jobset.json (the recovery original,
-	// GPU-119); model.ErrAlreadyExists if it exists.
+	// Create writes the job's first item with the SHA-256 of its jobset.json (the recovery original, also sent
+	// in job.submitted, GPU-271); model.ErrAlreadyExists if it exists.
 	Create(ctx context.Context, jobID, jobsetSHA256 string) error
 	// Restart moves a stopped job from generation from to from+1 for a user restart (GPU-240); nil when it is
 	// already there, model.ErrGenerationMoved when the item is elsewhere or a recovery owns it.
@@ -202,7 +202,13 @@ func (s *JobService) Options() model.TrainingOptions {
 		hyper = append(hyper, model.HyperparameterDef{Key: h.Key, Level: h.Level, Type: h.Type, Nullable: h.Nullable,
 			Default: defaults[h.Key], Min: h.Min, ExclusiveMin: h.ExclusiveMin, Max: h.Max})
 	}
+	named := make([]model.NamedDataset, 0, len(st.NamedDatasets))
+	for n, d := range st.NamedDatasets {
+		named = append(named, model.NamedDataset{Name: n, ID: d.ID, Version: d.Version})
+	}
+	sort.Slice(named, func(i, j int) bool { return named[i].Name < named[j].Name })
 	return model.TrainingOptions{
+		NamedDatasets:   named,
 		Strategies:      strategies,
 		DefaultStrategy: tr.DefaultStrategy,
 		Finetunes:       finetunes,

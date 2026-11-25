@@ -99,17 +99,13 @@ func run() error {
 		Record:    timelineStore,
 	})
 
-	// Recovery controller lookup (GPU-119). No placement source is connected yet: the worker nodes of a job
-	// are on the EKS workers, which the backend does not read, so the lookup answers 503 until one is.
-	recovery := service.NewRecoveryService(cfg.Bucket, jobs, kube, fencing, service.NoPlacement{})
-
 	// Management-cluster steps (Kueue quota, MultiKueue dispatch, finish) for the job timeline.
 	go timeline.NewTracker(kube, timelineStore, model.ManagerCluster).Run(ctx, 2*time.Second)
 
 	gin.SetMode(gin.ReleaseMode)
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           handler.NewRouter(jobs, cfg.AllowedOrigin, handler.Internal{Recovery: recovery, Token: cfg.RecoveryAPIToken}),
+		Handler:           handler.NewRouter(jobs, cfg.AllowedOrigin),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

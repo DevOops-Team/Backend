@@ -83,6 +83,20 @@ func TestLoadRejectsInconsistentValues(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsBadNamedDatasets(t *testing.T) {
+	s, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.NamedDatasets = map[string]NamedDataset{"Bad_Name": {ID: "nodash", Version: 0}}
+	err = s.check()
+	for _, want := range []string{"valid job name", "fixed dataset id"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to mention %s", err, want)
+		}
+	}
+}
+
 func TestWithImagesOverridesOnlyWhenSet(t *testing.T) {
 	base := Settings{Images: Images{Trainer: "t-file", Checkpoint: "c-file"}}
 

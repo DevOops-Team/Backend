@@ -19,28 +19,14 @@ Frontend ◀── 폴링 ── Backend ◀── 데이터 DB v_job_status (ba
 
 | 메서드 · 경로 | 내용 |
 |---|---|
-| `GET /api/training/options` | 방식 · GPU 범위 · 하이퍼파라미터 기본값과 범위 · 업로드 상한 · 체크포인트 계산 기본값 |
+| `GET /api/training/options` | 방식 · GPU 범위 · 하이퍼파라미터 기본값과 범위 · 업로드 상한 · 체크포인트 계산 기본값 · `namedDatasets`(학습 이름 → S3 고정 데이터셋, 설정 `named_datasets`. 화면에서 그 이름을 적으면 파일 없이 `spec.dataset`으로 제출, GPU-160. 기본 `devoops` → `qwen25-14b-wikitext103` v1) |
 | `POST /api/jobs` | multipart. 첫 파트 `spec`(JSON), 이어서 `model/<폴더>/<경로>` 파일들(`config.json` 필수), `data/<파일>.jsonl` 1개 이상, `train/<파일>.py` 정확히 1개(최대 1MiB, `/data/code/train.py`로 주입). 경로는 파트 **이름**에 넣는다 |
 | `GET /api/jobs` · `/api/jobs/{id}` | 관리 클러스터 JobSet + 데이터 DB `v_job_status`의 상태 · 진행률 · 마지막 승인 체크포인트 |
 | `GET /api/jobs/{id}/events` | 타임라인: 데이터 DB `job_runs` · `checkpoints`(세대별 제출 · 시작 · 종료, 승인 체크포인트) + 관리 클러스터 Event (메모리) |
 | `GET /api/jobs/{id}/files` · `/files/{kind}/{name}` | `code/<id>/`의 train.py · config.json · jobset.json, 업로드 manifest.json 앞부분 |
 | `GET /api/jobs/{id}/model` · `/model/files/{name}` | 학습 완료(SUCCEEDED) 모델 = 데이터 DB `checkpoints`의 마지막 승인본(ADR-30)과 그 manifest.json의 파일 목록. 파일은 누를 때 만든 15분짜리 S3 presigned URL(`jobs/<id>/gen-N/step-N/<파일>`)로 302, 브라우저가 S3에서 직접 받는다. manifest에 있는 이름만 |
 
-| `GET /internal/v1/recovery/jobs/{id}?generation=N` | 복구 컨트롤러 전용 (GPU-119, 계약: K8s `recovery-controller/docs/backend-metadata-api.md` v1). `Authorization: Bearer <RECOVERY_API_TOKEN>`. 프론트 `/api/` 프록시 밖이라 클러스터 안에서만 닿는다. 아래 참고 |
-
 오류는 `{"error","code","fields"}`: 400 입력 · 409 중복(모델은 `NOT_FINISHED` = 학습 안 끝남) · 413 업로드 상한 초과 · 502 S3 · 관리 클러스터 · DynamoDB(펜싱).
-
-### 복구 조회 API (GPU-119)
-
-| 필드 | 출처 |
-|---|---|
-| `jobset_uri` · `jobset_sha256` | `s3://<버킷>/code/<id>/jobset.json`과, 제출 때 펜싱 항목 `jobset_sha256`에 기록한 그 바이트의 해시 (지금 객체를 다시 해시하지 않음) |
-| `jobset_name` · `jobset_uid` | 관리 클러스터의 `job-<id>-g<NNNN>` JobSet과 그 UID |
-| `gpu_count` · `recovery_eligible` | 작업 상태(`GET /api/jobs/{id}`와 같음). CANCELLED · STOPPING · SUCCEEDED면 false |
-| `cluster` · `active_nodes` · `placement_generation` · `observed_at` | 배치 출처(`service.PlacementSource`). **아직 연결되지 않아** 지금은 항상 503 `PLACEMENT_UNAVAILABLE` |
-
-- 404 작업 · 세대 없음, 422 잘못된 요청 · 펜싱 항목 없음 · 해시 없음(GPU-119 이전 제출), 503 배치 모름 · 일시 오류 · 토큰 미설정, 401 토큰 없음 · 틀림
-- 배치 출처가 생기면 `PlacementSource`를 구현해 `cmd/api/main.go`의 `service.NoPlacement{}` 자리에 넣는다. 노드 수 · 중복 · 클러스터 · 세대(요청 세대와 정확히 같아야 함) · 관측 시각을 검사해 맞지 않으면 200 대신 503
 
 ## 체크포인트 간격
 
@@ -64,7 +50,6 @@ Frontend ◀── 폴링 ── Backend ◀── 데이터 DB v_job_status (ba
 | `AWS_REGION` | `us-east-2` | AWS 자격은 SDK 기본 체인 |
 | `KUBECONFIG` · `KUBE_CONTEXT` | 클러스터 안 | |
 | `BACKEND_SETTINGS` | 내장 `default.json` | 큐 · 이미지 · Pod 자원 · 학습 옵션 · 체크포인트 · 업로드 상한 |
-| `RECOVERY_API_TOKEN` | 비어 있음 | 복구 조회 API의 서비스 Bearer 토큰 (Secret). 비우면 그 API만 503 `NOT_CONFIGURED` |
 | `ALLOWED_ORIGIN` · `LISTEN_ADDR` | `http://localhost:5173` · `:8080` | |
 
 ## 구조

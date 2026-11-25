@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: DevOops Backend API
-  version: 0.4.0
+  version: 0.5.0
   description: |
     학습 작업을 제출하고 진행 상태를 보는 API. Confluence `서비스 API 명세`를 따른다.
 
@@ -27,9 +27,6 @@ tags:
     description: 학습이 끝난 작업의 최종 모델 (마지막 승인 체크포인트, ADR-30) 내려받기. 파일은 S3 presigned URL로 직접 받는다
   - name: health
     description: 상태 확인
-  - name: internal
-    description: |
-      서비스 간 API (프론트 `/api/` 프록시를 거치지 않아 클러스터 안에서만 닿는다). 서비스 전용 Bearer 토큰(`RECOVERY_API_TOKEN`)이 필요하다.
 
 paths:
   /healthz:
@@ -317,72 +314,7 @@ paths:
         "409": { $ref: "#/components/responses/NotFinished" }
         "502": { $ref: "#/components/responses/BadGateway" }
 
-  /internal/v1/recovery/jobs/{id}:
-    get:
-      tags: [internal]
-      summary: 복구 컨트롤러용 장애 작업 메타데이터 (GPU-119)
-      operationId: getRecoveryMetadata
-      description: |
-        복구 컨트롤러가 `job#<id>`가 없을 때 장애 세대의 원본 · 배치를 확인하고 복구 테이블에 처음 등록하는 데 쓴다.
-        계약은 K8s `recovery-controller/docs/backend-metadata-api.md` v1. 모든 숫자는 정수, 시각은 Unix 초.
-
-        - `jobset_sha256`은 제출 때 펜싱 항목에 기록한 `code/<id>/jobset.json` 바이트의 해시다. 지금 객체를 다시 해시하지 않는다.
-        - `jobset_uid`는 관리 클러스터 JobSet의 UID다 (워커 MultiKueue 복사본 아님).
-        - `cluster` · `active_nodes` · `placement_generation` · `observed_at`은 신뢰된 배치 기록에서만 온다. 배치 출처가 아직 연결되지
-          않아 지금은 항상 503 `PLACEMENT_UNAVAILABLE`이다. 빈 노드나 추정한 값으로 200을 만들지 않는다.
-        - `recovery_eligible`: 사용자가 중단(CANCELLED · STOPPING)했거나 정상 완료(SUCCEEDED)면 false. 실패만으로는 false가 아니다.
-          삭제한 작업은 404다.
-
-        오류: 401 토큰 없음 · 틀림, 404 작업 · 세대 없음, 422 잘못된 요청 · 영구 메타데이터 오류, 503 준비 안 됨 · 일시 오류(재시도).
-      security:
-        - ServiceToken: []
-      parameters:
-        - $ref: "#/components/parameters/JobID"
-        - name: generation
-          in: query
-          required: true
-          description: 장애가 난 원본 세대 (1 이상)
-          schema: { type: integer, minimum: 1, example: 1 }
-      responses:
-        "200":
-          description: 장애 세대의 복구 메타데이터
-          headers:
-            Cache-Control:
-              schema: { type: string, example: no-store }
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/RecoveryMetadata" }
-        "401":
-          description: Bearer 토큰 없음 · 틀림 (code UNAUTHORIZED)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/InternalError" }
-        "404":
-          description: 작업 없음(NOT_FOUND) 또는 그 세대의 관리 JobSet 없음(GENERATION_NOT_FOUND)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/InternalError" }
-        "422":
-          description: |
-            잘못된 요청(INVALID_REQUEST) 또는 영구 메타데이터 오류: 펜싱 항목 없음(FENCING_ITEM_MISSING),
-            제출 때 기록한 해시 없음 · GPU-119 이전 작업(JOBSET_DIGEST_MISSING), 값 형식 오류(METADATA_INVALID)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/InternalError" }
-        "503":
-          description: |
-            배치를 아직 모름(PLACEMENT_UNAVAILABLE), 관리 클러스터 · DynamoDB · 데이터 DB 일시 오류(UPSTREAM),
-            토큰 미설정(NOT_CONFIGURED). 다시 시도한다
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/InternalError" }
-
 components:
-  securitySchemes:
-    ServiceToken:
-      type: http
-      scheme: bearer
-      description: 서비스 전용 토큰 (Backend 환경 변수 `RECOVERY_API_TOKEN`, Secret으로 공급)
   parameters:
     JobID:
       name: id
@@ -432,38 +364,6 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
 
   schemas:
-    RecoveryMetadata:
-      type: object
-      additionalProperties: false
-      required: [schema_version, job_id, generation, recovery_eligible, jobset_uri, jobset_sha256, gpu_count, cluster,
-        active_nodes, placement_generation, jobset_name, jobset_uid, observed_at, allow_restart_from_scratch]
-      properties:
-        schema_version: { type: integer, enum: [1] }
-        job_id: { type: string, example: abc123 }
-        generation: { type: integer, minimum: 1, description: 요청한 장애 원본 세대 }
-        recovery_eligible: { type: boolean }
-        jobset_uri: { type: string, example: "s3://devoops-prod-ckpt-947027666399-us-east-2/code/abc123/jobset.json" }
-        jobset_sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
-        gpu_count: { type: integer, minimum: 1, maximum: 4 }
-        cluster: { type: string, example: eks-a }
-        active_nodes:
-          type: array
-          description: 그 세대의 모든 참여 노드, 중복 없이 GPU 수만큼
-          items: { type: string }
-        placement_generation: { type: integer, minimum: 1, description: 이 배치가 속한 실행 세대. 요청 세대(generation)와 항상 같다 }
-        jobset_name: { type: string, example: job-abc123-g0001 }
-        jobset_uid: { type: string, description: 관리 클러스터 JobSet UID }
-        observed_at: { type: integer, format: int64, description: 배치를 확인한 시각 (응답 시각 아님) }
-        allow_restart_from_scratch: { type: boolean }
-    InternalError:
-      type: object
-      required: [error, code]
-      properties:
-        error: { type: string }
-        code:
-          type: string
-          enum: [UNAUTHORIZED, NOT_CONFIGURED, NOT_FOUND, GENERATION_NOT_FOUND, INVALID_REQUEST, FENCING_ITEM_MISSING,
-            JOBSET_DIGEST_MISSING, METADATA_INVALID, PLACEMENT_UNAVAILABLE, UPSTREAM]
     Error:
       type: object
       required: [error, code]
@@ -496,7 +396,7 @@ components:
 
     TrainingOptions:
       type: object
-      required: [strategies, defaultStrategy, finetunes, defaultFinetune, gpus, datasetFormat, hyperparameters, limits, checkpoint]
+      required: [strategies, defaultStrategy, finetunes, defaultFinetune, gpus, datasetFormat, hyperparameters, limits, checkpoint, namedDatasets]
       properties:
         strategies:
           type: array
@@ -519,6 +419,16 @@ components:
               strategies: { type: array, items: { type: string }, example: [fsdp] }
               lora: { $ref: "#/components/schemas/Lora" }
         defaultFinetune: { type: string, example: full }
+        namedDatasets:
+          type: array
+          description: "학습 이름 → S3 고정 데이터셋 (GPU-160). 화면에서 이 이름을 적으면 모델 · 데이터 · 학습 코드 단계를 건너뛰고 파일 없이 spec.dataset {id, version}으로 제출한다. 브라우저로 올리기엔 큰 모델(14B)용"
+          items:
+            type: object
+            required: [name, id, version]
+            properties:
+              name: { type: string, example: devoops }
+              id: { type: string, example: qwen25-14b-wikitext103 }
+              version: { type: integer, example: 1 }
         gpus: { $ref: "#/components/schemas/GPURange" }
         datasetFormat: { type: string, example: text-jsonl }
         hyperparameters:

@@ -11,8 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"slices"
+	"strings"
 )
+
+// datasetName is the job name and fixed dataset id rule (service validName): DNS label.
+var datasetName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 //go:embed default.json
 var defaultSettings []byte
@@ -30,6 +35,16 @@ type Settings struct {
 	Training        Training                  `json:"training"`
 	Checkpoint      Checkpoint                `json:"checkpoint"`
 	Limits          Limits                    `json:"limits"`
+	// NamedDatasets map a training name to a fixed dataset already in S3 (GPU-160): typing that name on the
+	// submit screen skips the model · data · train.py steps and submits with spec.dataset, for models too
+	// big to upload from the browser (Qwen2.5-14B ≈ 29.5GB > limits.max_model_bytes).
+	NamedDatasets map[string]NamedDataset `json:"named_datasets,omitempty"`
+}
+
+// NamedDataset is datasets/<id>/v<version>/ (manifest.json · model/ · data/ · code/train.py, GPU-200).
+type NamedDataset struct {
+	ID      string `json:"id"`
+	Version int    `json:"version"`
 }
 
 type Queue struct {
@@ -203,6 +218,14 @@ func (s Settings) check() error {
 	c := s.Checkpoint
 	if c.BytesPerParam <= 0 || c.WriteBytesPerSecond <= 0 || c.MTBFSeconds <= 0 || c.MinIntervalSeconds <= 0 || c.WarmupMeasureSteps < 1 {
 		errs = append(errs, errors.New("checkpoint values must be positive"))
+	}
+	for name, d := range s.NamedDatasets {
+		if !datasetName.MatchString(name) {
+			errs = append(errs, fmt.Errorf("named_datasets %q: the name must be a valid job name", name))
+		}
+		if !datasetName.MatchString(d.ID) || !strings.Contains(d.ID, "-") || d.Version < 1 {
+			errs = append(errs, fmt.Errorf("named_datasets %s: id must be a fixed dataset id (with '-') and version >= 1", name))
+		}
 	}
 	l := s.Limits
 	if l.MaxModelBytes <= 0 || l.MaxDataBytes <= 0 || l.MaxFiles <= 0 {
