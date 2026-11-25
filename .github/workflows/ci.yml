@@ -1,7 +1,8 @@
 # 협업 규칙 §7 CI 파이프라인.
-#   PR(→ develop, → main)              : 린트(Go · OpenAPI) · 테스트 · 빌드 + 이미지 빌드 (push 안 함)
-#   main push(머지)             : 같은 검사 → 릴리스 버전 계산 → 이미지 push  ghcr.io/devoops-team/backend:{X.Y.Z, X.Y, main, sha-<7자리>}
+#   PR(→ develop, → main)              : 린트(Go · OpenAPI) · 테스트 · 빌드 + 이미지 빌드 (push 안 함). 검사와 이미지 빌드는 병렬 (GPU-282)
+#   main push(머지)             : 릴리스 버전 계산 → 이미지 push  ghcr.io/devoops-team/backend:{X.Y.Z, X.Y, main, sha-<7자리>}
 #                                 → 버전 봇이 태그 vX.Y.Z · Release 생성 → 배포 봇이 Gitops overlay에 X.Y.Z@digest 반영
+#                                 lint · test는 다시 돌리지 않는다: develop → main PR에서 같은 트리를 이미 검사했다 (GPU-282)
 #   버전 · description은 develop → main PR 본문의 '## 릴리스 노트'에서 나온다 (GPU-136, 형식은 .github/pull_request_template.md).
 #   main 머지 커밋이 PR 머지가 아니거나 릴리스 노트가 없으면 이미지 push · 배포를 하지 않는다.
 #   trainer 이미지(ghcr.io/devoops-team/trainer)는 Data 레포 trainer/에서 빌드 · 배포한다 (GPU-154)
@@ -34,6 +35,7 @@ jobs:
 
   check:
     name: lint · test · build
+    if: github.event_name != 'push'      # main push는 develop → main PR에서 검사한 트리 (GPU-282)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -53,7 +55,7 @@ jobs:
 
   image:
     name: image
-    needs: [check, plan]
+    needs: [plan]                        # 검사를 기다리지 않는다: PR에서는 병렬, main push에서는 검사 없음 (GPU-282)
     runs-on: ubuntu-latest
     outputs:
       image: ${{ env.IMAGE }}
