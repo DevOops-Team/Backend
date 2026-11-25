@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -183,4 +184,125 @@ func TestSubmitWithAnUploadRejectsFilePartsAndBadIDs(t *testing.T) {
 func isKind(err error, k Kind) bool {
 	var e *Error
 	return errors.As(err, &e) && e.Kind == k
+}
+
+// A multipart file: a 5 MiB + 3 byte model in 5 MiB parts (S3's minimum part size).
+const mpPart = 5 << 20
+
+var mpModel = strings.Repeat("w", mpPart) + "end"
+
+func multipartRequest() model.UploadRequest {
+	req := uploadRequest()
+	req.PartBytes = mpPart
+	req.Files[1] = model.UploadFile{Path: "model/gpt2/model.bin", Size: int64(len(mpModel)), SHA256: hexSum(mpModel),
+		Parts: []string{hexSum(mpModel[:mpPart]), hexSum(mpModel[mpPart:])}}
+	return req
+}
+
+// putParts stores the parts where the part URLs point, as the browser's PUTs would.
+func putParts(objs fakeObjects, uploadID string, parts ...string) {
+	for i, p := range parts {
+		objs[fmt.Sprintf("mpu/%s/%d", uploadID, i+1)] = p
+	}
+}
+
+func multipartID(t *testing.T, objs fakeObjects) string {
+	var st uploadState
+	if err := json.Unmarshal([]byte(objs[uploadPrefix+"upload.json"]), &st); err != nil {
+		t.Fatal(err)
+	}
+	mp, ok := st.Multipart["model/model.bin"]
+	if !ok || st.PartBytes != mpPart || len(mp.Parts) != 2 {
+		t.Fatalf("upload.json = %+v", st)
+	}
+	return mp.UploadID
+}
+
+func TestCreateUploadSignsEachPartOfAMultipartFile(t *testing.T) {
+	objs := fakeObjects{}
+	ticket, err := submitService(t, objs, &submitted{}).CreateUpload(context.Background(), multipartRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := multipartID(t, objs)
+	for _, f := range ticket.Files {
+		if f.Path != "model/gpt2/model.bin" {
+			if f.URL == "" || len(f.Parts) != 0 {
+				t.Errorf("%s should be a single PUT: %+v", f.Path, f)
+			}
+			continue
+		}
+		if f.URL != "" || len(f.Parts) != 2 {
+			t.Fatalf("multipart target = %+v", f)
+		}
+		for i, p := range f.Parts {
+			want := []int64{mpPart, 3}[i]
+			if p.Number != int32(i+1) || p.Size != want || !strings.Contains(p.URL, "uploadId="+id) ||
+				p.Headers["x-amz-checksum-sha256"] != hexSum(mpModel[int64(i)*mpPart:int64(i)*mpPart+want]) {
+				t.Errorf("part %d = %+v", i+1, p)
+			}
+		}
+	}
+	var m model.DatasetManifest
+	if err := json.Unmarshal([]byte(objs[uploadPrefix+"manifest.json"]), &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range m.Files {
+		if e.Name == "model/model.bin" && (e.SHA256 != hexSum(mpModel) || e.SizeBytes != int64(len(mpModel))) {
+			t.Errorf("manifest keeps the whole-file sha256 for ckpt-init: %+v", e)
+		}
+	}
+}
+
+func TestCreateUploadChecksTheParts(t *testing.T) {
+	for name, edit := range map[string]func(*model.UploadRequest){
+		"part size too small": func(r *model.UploadRequest) { r.PartBytes = 1 << 20 },
+		"wrong part count":    func(r *model.UploadRequest) { r.Files[1].Parts = r.Files[1].Parts[:1] },
+		"bad part sha":        func(r *model.UploadRequest) { r.Files[1].Parts[0] = "nothex" },
+		"one part only": func(r *model.UploadRequest) {
+			r.Files[0].Parts = []string{r.Files[0].SHA256} // config.json is smaller than one part
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := multipartRequest()
+			edit(&req)
+			objs := fakeObjects{}
+			if _, err := submitService(t, objs, &submitted{}).CreateUpload(context.Background(), req); !isKind(err, KindInvalid) {
+				t.Fatalf("err = %v, want invalid", err)
+			}
+			if len(objs) != 0 {
+				t.Errorf("a rejected upload wrote %v", objs)
+			}
+		})
+	}
+}
+
+func TestSubmitCompletesTheMultipartFileFromItsCheckedParts(t *testing.T) {
+	objs := fakeObjects{}
+	sched := &submitted{}
+	svc := submitService(t, objs, sched)
+	if _, err := svc.CreateUpload(context.Background(), multipartRequest()); err != nil {
+		t.Fatal(err)
+	}
+	id := multipartID(t, objs)
+	putAll(objs)
+	delete(objs, uploadPrefix+"model/model.bin") // a multipart file exists only once completed
+
+	putParts(objs, id, mpModel[:mpPart]) // one of two parts
+	if _, err := svc.Submit(context.Background(), uploadSpec(), &parts{}); !isKind(err, KindInvalid) || sched.js != nil {
+		t.Fatalf("with a part missing: err = %v, submitted %v", err, sched.js != nil)
+	}
+	putParts(objs, id, mpModel[:mpPart], "XYZ") // the last part differs
+	if _, err := svc.Submit(context.Background(), uploadSpec(), &parts{}); !isKind(err, KindInvalid) || sched.js != nil {
+		t.Fatalf("with a different part: err = %v, submitted %v", err, sched.js != nil)
+	}
+
+	putParts(objs, id, mpModel[:mpPart], mpModel[mpPart:])
+	created, err := svc.Submit(context.Background(), uploadSpec(), &parts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID != "a1b2c3d4" || objs[uploadPrefix+"model/model.bin"] != mpModel {
+		t.Errorf("created %s, completed object %d bytes", created.ID, len(objs[uploadPrefix+"model/model.bin"]))
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +34,44 @@ func (f fakeObjects) DeleteAll(context.Context, string) error { return nil }
 // PresignPut returns a fake URL; the checksum header carries the hex sum so tests can see it.
 func (f fakeObjects) PresignPut(_ context.Context, key string, size int64, sha string, ttl time.Duration) (string, map[string]string, error) {
 	return fmt.Sprintf("https://s3.example/%s?put&size=%d&ttl=%s", key, size, ttl), map[string]string{"x-amz-checksum-sha256": sha}, nil
+}
+
+// Multipart in the in-memory bucket: "mpu/<upload id>" holds the key, "mpu/<upload id>/<n>" a part.
+func (f fakeObjects) CreateMultipart(_ context.Context, key string) (string, error) {
+	id := fmt.Sprintf("up%d", len(f))
+	f["mpu/"+id] = key
+	return id, nil
+}
+
+func (f fakeObjects) PresignUploadPart(_ context.Context, key, uploadID string, number int32, size int64, sha string, _ time.Duration) (string, map[string]string, error) {
+	return fmt.Sprintf("https://s3.example/%s?uploadId=%s&partNumber=%d&size=%d", key, uploadID, number, size), map[string]string{"x-amz-checksum-sha256": sha}, nil
+}
+
+func (f fakeObjects) ListParts(_ context.Context, key, uploadID string) ([]model.UploadedPart, error) {
+	if f["mpu/"+uploadID] != key {
+		return nil, model.ErrNotFound
+	}
+	var parts []model.UploadedPart
+	for n := int32(1); ; n++ {
+		v, ok := f[fmt.Sprintf("mpu/%s/%d", uploadID, n)]
+		if !ok {
+			break
+		}
+		sum := sha256.Sum256([]byte(v))
+		parts = append(parts, model.UploadedPart{Number: n, ETag: fmt.Sprintf("etag%d", n), Size: int64(len(v)), SHA256: hex.EncodeToString(sum[:])})
+	}
+	return parts, nil
+}
+
+func (f fakeObjects) CompleteMultipart(_ context.Context, key, uploadID string, parts []model.UploadedPart) error {
+	var b strings.Builder
+	for _, p := range parts {
+		b.WriteString(f[fmt.Sprintf("mpu/%s/%d", uploadID, p.Number)])
+		delete(f, fmt.Sprintf("mpu/%s/%d", uploadID, p.Number))
+	}
+	delete(f, "mpu/"+uploadID)
+	f[key] = b.String()
+	return nil
 }
 
 // Head reports an object's size and, as its checksum, the SHA-256 of what is stored (what S3 would check).
