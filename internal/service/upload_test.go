@@ -306,3 +306,35 @@ func TestSubmitCompletesTheMultipartFileFromItsCheckedParts(t *testing.T) {
 		t.Errorf("created %s, completed object %d bytes", created.ID, len(objs[uploadPrefix+"model/model.bin"]))
 	}
 }
+
+// forbiddenHead is the real bucket for the backend role: HeadObject of a missing key is 403, not 404.
+type forbiddenHead struct{ bucketObjects }
+
+func (f forbiddenHead) Head(ctx context.Context, key string) (model.ObjectHead, error) {
+	if _, ok := f.fakeObjects[key]; !ok {
+		return model.ObjectHead{}, errors.New("operation error S3: HeadObject, https response error StatusCode: 403, api error Forbidden")
+	}
+	return f.fakeObjects.Head(ctx, key)
+}
+
+func TestSubmitCompletesAMultipartFileWithoutReadingTheMissingObject(t *testing.T) {
+	objs := fakeObjects{}
+	sched := &submitted{}
+	svc := submitService(t, objs, sched)
+	svc.objects = forbiddenHead{bucketObjects{objs}}
+	if _, err := svc.CreateUpload(context.Background(), multipartRequest()); err != nil {
+		t.Fatal(err)
+	}
+	id := multipartID(t, objs)
+	putAll(objs)
+	delete(objs, uploadPrefix+"model/model.bin")
+	putParts(objs, id, mpModel[:mpPart], mpModel[mpPart:])
+
+	created, err := svc.Submit(context.Background(), uploadSpec(), &parts{})
+	if err != nil {
+		t.Fatalf("submit with 403 on the missing object: %v", err)
+	}
+	if created.ID != "a1b2c3d4" || objs[uploadPrefix+"model/model.bin"] != mpModel || sched.js == nil {
+		t.Errorf("created %s, completed %d bytes, submitted %v", created.ID, len(objs[uploadPrefix+"model/model.bin"]), sched.js != nil)
+	}
+}
