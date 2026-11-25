@@ -16,6 +16,7 @@ import (
 type JobService interface {
 	Options() model.TrainingOptions
 	Submit(ctx context.Context, spec model.SubmitSpec, src service.UploadSource) (model.CreatedJob, error)
+	CreateUpload(ctx context.Context, req model.UploadRequest) (model.UploadTicket, error)
 	List(ctx context.Context) ([]model.Job, error)
 	Get(ctx context.Context, id string) (model.Job, error)
 	Events(ctx context.Context, id string) ([]model.JobEvent, error)
@@ -40,6 +41,7 @@ func NewRouter(jobs JobService, allowedOrigin string) *gin.Engine {
 	h := &jobHandler{jobs: jobs}
 	r.GET("/healthz", healthz)
 	r.GET("/api/training/options", h.options)
+	r.POST("/api/uploads", h.createUpload)
 	r.POST("/api/jobs", h.create)
 	r.GET("/api/jobs", h.list)
 	r.GET("/api/jobs/:id", h.get)

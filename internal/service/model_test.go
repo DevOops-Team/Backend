@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -26,6 +29,21 @@ func (f fakeObjects) Get(_ context.Context, key string, limit int64) ([]byte, in
 }
 
 func (f fakeObjects) DeleteAll(context.Context, string) error { return nil }
+
+// PresignPut returns a fake URL; the checksum header carries the hex sum so tests can see it.
+func (f fakeObjects) PresignPut(_ context.Context, key string, size int64, sha string, ttl time.Duration) (string, map[string]string, error) {
+	return fmt.Sprintf("https://s3.example/%s?put&size=%d&ttl=%s", key, size, ttl), map[string]string{"x-amz-checksum-sha256": sha}, nil
+}
+
+// Head reports an object's size and, as its checksum, the SHA-256 of what is stored (what S3 would check).
+func (f fakeObjects) Head(_ context.Context, key string) (model.ObjectHead, error) {
+	v, ok := f[key]
+	if !ok {
+		return model.ObjectHead{}, model.ErrNotFound
+	}
+	sum := sha256.Sum256([]byte(v))
+	return model.ObjectHead{Size: int64(len(v)), SHA256: hex.EncodeToString(sum[:])}, nil
+}
 
 // Presign returns a fake URL that records what was signed.
 func (f fakeObjects) Presign(_ context.Context, key, filename string, ttl time.Duration) (string, error) {
