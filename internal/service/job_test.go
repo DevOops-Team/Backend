@@ -68,6 +68,24 @@ func TestDefaultGPUOptionsCanBeSubmittedForBothStrategies(t *testing.T) {
 	}
 }
 
+// GPU-160: the screen reads namedDatasets and sends spec.dataset {id, version} with no file parts.
+func TestOptionsListNamedDatasetsAndTheyPassValidation(t *testing.T) {
+	cfg, err := settings.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewJobService(Config{Settings: cfg}, Deps{})
+	named := s.Options().NamedDatasets
+	if len(named) != 1 || named[0] != (model.NamedDataset{Name: "devoops", ID: "qwen25-14b-wikitext103", Version: 1}) {
+		t.Fatalf("namedDatasets = %+v, want devoops → qwen25-14b-wikitext103 v1", named)
+	}
+	spec := model.SubmitSpec{Name: named[0].Name, Strategy: "fsdp", Finetune: "qlora", GPUs: 2,
+		Dataset: &model.SpecDataset{ID: named[0].ID, Version: named[0].Version}}
+	if _, _, _, err := s.validate(spec); err != nil {
+		t.Errorf("validate %+v: %v", spec, err)
+	}
+}
+
 func TestListShowsTheDatabaseStatusAndProgress(t *testing.T) {
 	sched := fakeScheduler{[]model.JobStatus{{ID: "0cb3b0c3", Generation: 1, Status: model.StatusAdmitted, CreatedAt: t0}}}
 	started := t0.Add(time.Minute)
