@@ -124,7 +124,7 @@ const (
 	maxMetadataBytes = 4 << 20 // config files and manifests are small
 	firstGeneration  = 1       // 복구 재제출은 재배치 실행기가 jobset.json으로 한다
 	datasetVersion   = 1       // 업로드는 제출마다 새 데이터셋: datasets/<job id>/v1
-	configSchema     = 3       // 3: finetune (full · qlora, GPU-262); 2: checkpoint_policy replaces checkpoint_every_steps
+	configSchema     = 4       // 4: checkpoint_policy.every_steps (GPU-298); 3: finetune (full · qlora, GPU-262); 2: checkpoint_policy replaces checkpoint_every_steps
 	manifestSchema   = 1
 	manifestName     = "manifest.json"
 	modelConfigName  = "model/config.json" // every Hugging Face model folder has it
@@ -229,7 +229,7 @@ func (s *JobService) Options() model.TrainingOptions {
 		Hyperparameters: hyper,
 		Limits: model.UploadLimits{MaxModelBytes: st.Limits.MaxModelBytes, MaxDataBytes: st.Limits.MaxDataBytes,
 			MaxTrainBytes: MaxTrainBytes, MaxFiles: st.Limits.MaxFiles},
-		Checkpoint: model.CheckpointDefaults{BytesPerParam: st.Checkpoint.BytesPerParam, WriteBytesPerSecond: st.Checkpoint.WriteBytesPerSecond,
+		Checkpoint: model.CheckpointDefaults{EverySteps: st.Checkpoint.EverySteps, BytesPerParam: st.Checkpoint.BytesPerParam, WriteBytesPerSecond: st.Checkpoint.WriteBytesPerSecond,
 			MTBFSeconds: st.Checkpoint.MTBFSeconds, MinIntervalSeconds: st.Checkpoint.MinIntervalSeconds},
 	}
 }
@@ -290,7 +290,7 @@ func (s *JobService) Submit(ctx context.Context, spec model.SubmitSpec, src Uplo
 		WarmupSteps:      merged.WarmupSteps,
 		Seed:             merged.Seed,
 		WorldSize:        spec.GPUs,
-		CheckpointPolicy: ckptpolicy.Compute(saved, ckptpolicy.Writers(strategy, spec.GPUs), s.cfg.Settings.Checkpoint),
+		CheckpointPolicy: checkpointPolicy(saved, ckptpolicy.Writers(strategy, spec.GPUs), s.cfg.Settings.Checkpoint),
 		Finetune:         model.ConfigFinetune{Method: finetune, Lora: configLora(method.Lora)},
 	}, "", "  ")
 	if err != nil {
@@ -953,4 +953,12 @@ func digestOf(image string) string {
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// checkpointPolicy is the Young/Daly policy (ckptpolicy.Compute, kept as is) plus the fixed step interval
+// from settings (GPU-298). every_steps 0 in settings restores the computed interval without code changes.
+func checkpointPolicy(savedParams int64, writers int, c settings.Checkpoint) model.CheckpointPolicy {
+	p := ckptpolicy.Compute(savedParams, writers, c)
+	p.EverySteps = c.EverySteps
+	return p
 }
