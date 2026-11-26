@@ -64,7 +64,10 @@ type UploadLimits struct {
 // CheckpointDefaults lets the screen preview the interval: τ = √(2 · C · M), C = saved parameters ·
 // bytesPerParam ÷ GPUs ÷ writeBytesPerSecond, at least minIntervalSeconds. Saved parameters are every
 // parameter for full and the LoRA adapter for qlora (GPU-261).
+//
+// EverySteps > 0 means the backend saves every that many steps instead (GPU-298); the screen shows that.
 type CheckpointDefaults struct {
+	EverySteps          int64   `json:"everySteps"`
 	BytesPerParam       float64 `json:"bytesPerParam"`
 	WriteBytesPerSecond float64 `json:"writeBytesPerSecond"`
 	MTBFSeconds         float64 `json:"mtbfSeconds"`

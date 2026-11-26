@@ -55,6 +55,7 @@
     ]
   },
   "checkpoint": {
+    "every_steps": 100,
     "bytes_per_param": 12,
     "write_bytes_per_second": 100000000,
     "mtbf_seconds": 21600,

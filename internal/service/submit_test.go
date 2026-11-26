@@ -279,13 +279,14 @@ func TestSubmitQLoRAWritesTheAdapterIntoConfigAndSizesTheCheckpointByIt(t *testi
 	if err := json.Unmarshal(created.Config, &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SchemaVersion != 3 || cfg.Finetune.Method != "qlora" || cfg.Finetune.Lora == nil || cfg.Finetune.Lora.R != 16 ||
+	if cfg.SchemaVersion != 4 || cfg.Finetune.Method != "qlora" || cfg.Finetune.Lora == nil || cfg.Finetune.Lora.R != 16 ||
 		len(cfg.Finetune.Lora.TargetModules) != 7 {
-		t.Errorf("config schema %d finetune %+v, want 3 · qlora with the default LoRA", cfg.SchemaVersion, cfg.Finetune)
+		t.Errorf("config schema %d finetune %+v, want 4 · qlora with the default LoRA", cfg.SchemaVersion, cfg.Finetune)
 	}
 	// 어댑터 16 · (128 + 80 + 80 + 128 + 192 · 3) = 15,872개 × 12 B ÷ 2 pods → 1 ms 남짓, 하한 300 s
-	if cfg.CheckpointPolicy.EstimatedSaveSeconds != 0 || cfg.CheckpointPolicy.IntervalSeconds != 300 {
-		t.Errorf("policy %+v, want the adapter's tiny save and the 300 s floor", cfg.CheckpointPolicy)
+	// 고정 100 step (GPU-298)과 함께 Young/Daly 값도 그대로 채운다 (every_steps 0이면 그걸로 복구)
+	if cfg.CheckpointPolicy.EverySteps != 100 || cfg.CheckpointPolicy.EstimatedSaveSeconds != 0 || cfg.CheckpointPolicy.IntervalSeconds != 300 {
+		t.Errorf("policy %+v, want every 100 steps, the adapter's tiny save and the 300 s floor", cfg.CheckpointPolicy)
 	}
 	if got := sched.js.GetAnnotations()[model.FinetuneAnnotation]; got != "qlora" {
 		t.Errorf("JobSet annotation %s = %q, want qlora", model.FinetuneAnnotation, got)

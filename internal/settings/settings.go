@@ -142,7 +142,12 @@ type Hyperparameter struct {
 
 // Checkpoint holds the Young/Daly inputs (design §5). The backend turns them into a time interval;
 // train.py turns the interval into a step interval once it has measured its step time.
+//
+// EverySteps > 0 overrides that with a fixed step interval (GPU-298: save every 100 steps for recovery
+// tests). The Young/Daly inputs stay and are still computed into config.json; set every_steps to 0 to
+// go back to the computed interval.
 type Checkpoint struct {
+	EverySteps          int64   `json:"every_steps"`            // fixed save interval in steps; 0 = Young/Daly (GPU-298)
 	BytesPerParam       float64 `json:"bytes_per_param"`        // checkpoint bytes per saved parameter: fp32 weight 4 + Adam moments 8 (GPU-261)
 	WriteBytesPerSecond float64 `json:"write_bytes_per_second"` // local NVMe DCP write; the sidecar uploads in parallel
 	MTBFSeconds         float64 `json:"mtbf_seconds"`           // mean time between failures; unknown, so a fixed default
@@ -216,7 +221,8 @@ func (s Settings) check() error {
 		errs = append(errs, fmt.Errorf("training.gpus.default %d must be an option within max %d", g.Default, g.Max))
 	}
 	c := s.Checkpoint
-	if c.BytesPerParam <= 0 || c.WriteBytesPerSecond <= 0 || c.MTBFSeconds <= 0 || c.MinIntervalSeconds <= 0 || c.WarmupMeasureSteps < 1 {
+	if c.BytesPerParam <= 0 || c.WriteBytesPerSecond <= 0 || c.MTBFSeconds <= 0 || c.MinIntervalSeconds <= 0 || c.WarmupMeasureSteps < 1 ||
+		c.EverySteps < 0 {
 		errs = append(errs, errors.New("checkpoint values must be positive"))
 	}
 	for name, d := range s.NamedDatasets {
