@@ -8,9 +8,13 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -70,13 +74,19 @@ func (o *Objects) List(ctx context.Context, prefix string) ([]model.ObjectInfo, 
 	return out, nil
 }
 
-// Get reads at most limit bytes and closes the body early, so previewing a large dataset
-// does not download all of it.
+// Get reads at most limit bytes and the object's whole size. It asks S3 for only those bytes (Range: bytes=0-limit-1),
+// so previewing a large dataset or reading a safetensors header does not pull the rest of the file over the network,
+// and the connection is reused because the body is read to its end.
 func (o *Objects) Get(ctx context.Context, key string, limit int64) ([]byte, int64, error) {
-	res, err := o.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(o.bucket), Key: aws.String(key)})
+	limit = max(limit, 1)
+	res, err := o.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(o.bucket), Key: aws.String(key),
+		Range: aws.String(fmt.Sprintf("bytes=0-%d", limit-1))})
 	var missing *types.NoSuchKey
 	if errors.As(err, &missing) {
 		return nil, 0, model.ErrNotFound
+	}
+	if invalidRange(err) {
+		return []byte{}, 0, nil // S3 answers 416 to a range of an empty object
 	}
 	if err != nil {
 		return nil, 0, err
@@ -86,7 +96,31 @@ func (o *Objects) Get(ctx context.Context, key string, limit int64) ([]byte, int
 	if err != nil {
 		return nil, 0, err
 	}
-	return data, aws.ToInt64(res.ContentLength), nil
+	// Reaches EOF so the connection goes back to the pool; bounded in case a server ignored the Range.
+	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
+	return data, objectSize(res), nil
+}
+
+// objectSize is the whole object's size: the total of Content-Range ("bytes 0-7/1234") for a partial answer,
+// Content-Length when the server sent the whole object.
+func objectSize(res *s3.GetObjectOutput) int64 {
+	if cr := aws.ToString(res.ContentRange); cr != "" {
+		if i := strings.LastIndexByte(cr, '/'); i >= 0 {
+			if n, err := strconv.ParseInt(cr[i+1:], 10, 64); err == nil {
+				return n
+			}
+		}
+	}
+	return aws.ToInt64(res.ContentLength)
+}
+
+func invalidRange(err error) bool {
+	var api smithy.APIError
+	if errors.As(err, &api) && api.ErrorCode() == "InvalidRange" {
+		return true
+	}
+	var re *awshttp.ResponseError
+	return errors.As(err, &re) && re.HTTPStatusCode() == http.StatusRequestedRangeNotSatisfiable
 }
 
 // Presign signs a GET for key that the browser downloads straight from S3, saved as filename. The URL also

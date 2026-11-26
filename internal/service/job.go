@@ -883,8 +883,8 @@ func (s *JobService) Files(ctx context.Context, id string) ([]model.File, error)
 		files = append(files, model.File{Kind: "code", Name: strings.TrimPrefix(o.Key, prefix), Size: o.Size})
 	}
 	if ref, err := s.datasetOf(ctx, id); err == nil {
-		if _, size, err := s.objects.Get(ctx, datasetPrefix(ref.ID, ref.Version)+manifestName, 1); err == nil {
-			files = append(files, model.File{Kind: "data", Name: manifestName, Size: size})
+		if h, err := s.objects.Head(ctx, datasetPrefix(ref.ID, ref.Version)+manifestName); err == nil {
+			files = append(files, model.File{Kind: "data", Name: manifestName, Size: h.Size})
 		}
 	}
 	return files, nil
