@@ -18,13 +18,13 @@ type Source interface {
 	Workloads(ctx context.Context) ([]unstructured.Unstructured, error)
 }
 
-// EventWriter stores timeline entries (DynamoDB devoops-job-events).
+// EventWriter stores timeline entries (repository.Timeline, in memory per replica).
 type EventWriter interface {
 	Put(ctx context.Context, e model.JobEvent) error
 }
 
 // Tracker polls one cluster and writes new or changed entries. Kubernetes keeps events for about
-// an hour, so the timeline in DynamoDB is what outlives them.
+// an hour, so the stored timeline is what outlives them (until the replica restarts).
 type Tracker struct {
 	src     Source
 	store   EventWriter

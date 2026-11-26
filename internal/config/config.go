@@ -2,7 +2,11 @@
 // Defaults match the prod infra (IaC environments/prod/data) and the training namespace.
 package config
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 type Config struct {
 	ListenAddr    string // LISTEN_ADDR
@@ -27,6 +31,9 @@ type Config struct {
 	// so a new image needs no backend build. Empty = the settings file value.
 	TrainerImage    string
 	CheckpointImage string
+	// TIMELINE_POLL: how often the timeline tracker lists the training namespace's Events and Workloads
+	// (Go duration, default 5s). Every replica lists on its own; the job screen polls every 3s.
+	TimelinePoll time.Duration
 }
 
 // Load reads the configuration through getenv (os.Getenv in main, a map in tests).
@@ -57,5 +64,10 @@ func Load(getenv func(string) string) (Config, error) {
 	if cfg.Bucket == "" {
 		return Config{}, errors.New("S3_BUCKET is required")
 	}
+	poll, err := time.ParseDuration(get("TIMELINE_POLL", "5s"))
+	if err != nil || poll <= 0 {
+		return Config{}, fmt.Errorf("TIMELINE_POLL must be a positive duration such as 5s, got %q", getenv("TIMELINE_POLL"))
+	}
+	cfg.TimelinePoll = poll
 	return cfg, nil
 }
