@@ -48,6 +48,7 @@ Frontend ◀── 폴링 ── Backend ◀── 데이터 DB v_job_status (ba
 | `TRAINER_IMAGE` | (필수) | `ghcr.io/devoops-team/trainer@sha256:…` (Data 레포 `trainer/`, 봇이 Gitops에 digest) |
 | `CHECKPOINT_IMAGE` | (필수) | `ghcr.io/devoops-team/checkpoint@sha256:…` (Data `checkpoint/`) |
 | `TRAINING_NAMESPACE` | `training` | |
+| `TIMELINE_POLL` | `5s` | 타임라인 tracker가 학습 namespace의 Event · Workload를 나열하는 주기 (replica마다) |
 | `AWS_REGION` | `us-east-2` | AWS 자격은 SDK 기본 체인 |
 | `KUBECONFIG` · `KUBE_CONTEXT` | 클러스터 안 | |
 | `BACKEND_SETTINGS` | 내장 `default.json` | 큐 · 이미지 · Pod 자원 · 학습 옵션 · 체크포인트 · 업로드 상한 |

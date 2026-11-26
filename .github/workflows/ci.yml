@@ -6,6 +6,7 @@
 #   버전 · description은 develop → main PR 본문의 '## 릴리스 노트'에서 나온다 (GPU-136, 형식은 .github/pull_request_template.md).
 #   main 머지 커밋이 PR 머지가 아니거나 릴리스 노트가 없으면 이미지 push · 배포를 하지 않는다.
 #   trainer 이미지(ghcr.io/devoops-team/trainer)는 Data 레포 trainer/에서 빌드 · 배포한다 (GPU-154)
+#   서드파티 action은 커밋 SHA로 고정한다 (주석이 버전, GPU-292). Gitops 재사용 워크플로는 @main.
 name: CI
 
 on:
@@ -26,8 +27,10 @@ env:
 
 jobs:
   # 버전 계산 (main push에서만 release=true). 로직은 Gitops 재사용 워크플로.
+  # PR의 릴리스 노트 형식 검사는 release-notes.yml이 하므로 PR에서는 돌리지 않는다 (GPU-292).
   plan:
     name: version
+    if: github.event_name == 'push'
     uses: DevOops-Team/Gitops/.github/workflows/release-plan.yml@main
     permissions:
       contents: read
@@ -37,26 +40,35 @@ jobs:
     name: lint · test · build
     if: github.event_name != 'push'      # main push는 develop → main PR에서 검사한 트리 (GPU-282)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      REDOCLY_CLI: 2.11.0
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
+      - name: npm cache (redocly)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.npm
+          key: npm-redocly-${{ runner.os }}-${{ env.REDOCLY_CLI }}
       - name: OpenAPI lint
-        run: npx --yes @redocly/cli@2.11.0 lint api/openapi.yaml
-      - name: test
+        run: npx --yes "@redocly/cli@${REDOCLY_CLI}" lint api/openapi.yaml
+      - name: test                       # 패키지를 모두 컴파일하므로 따로 go build 하지 않는다
         run: go test -race ./...
-      - name: build
-        run: go build ./...
 
   image:
     name: image
     needs: [plan]                        # 검사를 기다리지 않는다: PR에서는 병렬, main push에서는 검사 없음 (GPU-282)
+    # PR: plan이 건너뛰어져도 빌드한다(main 필수 검사). main push: 릴리스일 때만 (GPU-292)
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || needs.plan.outputs.release == 'true') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       image: ${{ env.IMAGE }}
       digest: ${{ steps.build.outputs.digest }}
@@ -66,17 +78,17 @@ jobs:
     env:
       PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to GHCR
         if: env.PUSH == 'true'
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
           tags: |
@@ -89,7 +101,7 @@ jobs:
           annotations: |
             ${{ env.PUSH == 'true' && format('org.opencontainers.image.description={0}', needs.plan.outputs.description) || '' }}
       - id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: deployments/Dockerfile

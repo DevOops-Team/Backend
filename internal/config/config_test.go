@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func env(vars map[string]string) func(string) string {
 	return func(k string) string { return vars[k] }
@@ -19,6 +22,7 @@ func TestLoadUsesDefaultsMatchingProdInfra(t *testing.T) {
 		FencingTable:  "devoops-prod-fencing",
 		KafkaTopic:    "job.lifecycle",
 		Namespace:     "training",
+		TimelinePoll:  5 * time.Second,
 	}
 	if cfg != want {
 		t.Errorf("cfg = %+v\nwant  %+v", cfg, want)
@@ -40,6 +44,7 @@ func TestLoadReadsEveryVariable(t *testing.T) {
 		"BACKEND_SETTINGS":      "/etc/settings.json",
 		"TRAINER_IMAGE":         "ghcr.io/devoops-team/trainer@sha256:t",
 		"CHECKPOINT_IMAGE":      "ghcr.io/devoops-team/checkpoint@sha256:c",
+		"TIMELINE_POLL":         "10s",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -49,6 +54,7 @@ func TestLoadReadsEveryVariable(t *testing.T) {
 		FencingTable: "f", KafkaBootstrap: "172.30.0.40:9092", KafkaTopic: "t",
 		Kubeconfig: "/kube/config", KubeContext: "ctx", Namespace: "ns", SettingsPath: "/etc/settings.json",
 		TrainerImage: "ghcr.io/devoops-team/trainer@sha256:t", CheckpointImage: "ghcr.io/devoops-team/checkpoint@sha256:c",
+		TimelinePoll: 10 * time.Second,
 	}
 	if cfg != want {
 		t.Errorf("cfg = %+v\nwant  %+v", cfg, want)
@@ -58,5 +64,13 @@ func TestLoadReadsEveryVariable(t *testing.T) {
 func TestLoadRequiresBucket(t *testing.T) {
 	if _, err := Load(env(nil)); err == nil {
 		t.Error("loaded without S3_BUCKET")
+	}
+}
+
+func TestLoadRejectsABadTimelinePoll(t *testing.T) {
+	for _, v := range []string{"5", "0s", "-1s", "fast"} {
+		if _, err := Load(env(map[string]string{"S3_BUCKET": "b", "TIMELINE_POLL": v})); err == nil {
+			t.Errorf("TIMELINE_POLL=%q loaded", v)
+		}
 	}
 }

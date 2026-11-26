@@ -100,7 +100,7 @@ func run() error {
 	})
 
 	// Management-cluster steps (Kueue quota, MultiKueue dispatch, finish) for the job timeline.
-	go timeline.NewTracker(kube, timelineStore, model.ManagerCluster).Run(ctx, 2*time.Second)
+	go timeline.NewTracker(kube, timelineStore, model.ManagerCluster).Run(ctx, cfg.TimelinePoll)
 
 	gin.SetMode(gin.ReleaseMode)
 	srv := &http.Server{

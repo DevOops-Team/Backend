@@ -254,6 +254,8 @@ func (s *JobService) uploadedDataset(ctx context.Context, id string, src UploadS
 		return datasetInput{}, invalid("spec.upload를 쓰면 파일 파트(model · data · train)를 보내지 않습니다")
 	}
 	// A job's inputs are written before the JobSet; a second submission of the same upload must not touch them.
+	// GetObject (1 byte), not HeadObject: a missing key must come back as NoSuchKey, and HeadObject turned a missing
+	// key into 403 for this role before (GPU-278).
 	if _, _, err := s.objects.Get(ctx, s.jobsetKey(id), 1); err == nil {
 		return datasetInput{}, &Error{Kind: KindConflict, Msg: "upload " + id + " is already submitted"}
 	} else if !errors.Is(err, model.ErrNotFound) {
