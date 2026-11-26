@@ -492,9 +492,10 @@ components:
           description: >-
             간격 계산 입력 (GPU-261). τ = √(2·C·M), C = 저장 파라미터 수 · bytesPerParam ÷ 쓰는 Pod 수 ÷ writeBytesPerSecond, 최소 minIntervalSeconds.
             저장 파라미터 수는 full이면 모델 전체, qlora면 LoRA 어댑터(Σ r·(in+out))이고 Backend가 safetensors 헤더의 텐서 모양으로 센다.
-            쓰는 Pod 수는 FSDP면 GPU 수, DDP면 1
-          required: [bytesPerParam, writeBytesPerSecond, mtbfSeconds, minIntervalSeconds]
+            쓰는 Pod 수는 FSDP면 GPU 수, DDP면 1. everySteps가 0보다 크면 τ 대신 그 step마다 저장한다 (GPU-298)
+          required: [everySteps, bytesPerParam, writeBytesPerSecond, mtbfSeconds, minIntervalSeconds]
           properties:
+            everySteps: { type: integer, example: 100, description: "고정 저장 간격(step). 0 = τ 사용" }
             bytesPerParam: { type: number, example: 12, description: "fp32 가중치 4 + Adam 모멘트 8" }
             writeBytesPerSecond: { type: number, example: 100000000 }
             mtbfSeconds: { type: number, example: 21600 }
@@ -598,7 +599,7 @@ components:
       description: 최종 config.json. 키는 snake_case 그대로다.
       required: [schema_version, model, training_mode, checkpoint_format, dataset, epochs, max_steps, batch_size_per_gpu, learning_rate, warmup_steps, seed, world_size, checkpoint_policy, finetune]
       properties:
-        schema_version: { type: integer, example: 3, description: "3: finetune 추가 (GPU-262). trainer 하네스는 2 · 3을 모두 받는다" }
+        schema_version: { type: integer, example: 4, description: "4: checkpoint_policy.every_steps 추가 (GPU-298). 3: finetune 추가 (GPU-262). trainer 하네스는 2 · 3 · 4를 모두 받는다" }
         model: { type: string, example: gpt2 }
         training_mode: { type: string, example: fsdp }
         checkpoint_format: { type: string, example: fsdp-dcp }
@@ -618,9 +619,10 @@ components:
         world_size: { type: integer, example: 2 }
         checkpoint_policy:
           type: object
-          description: "Young/Daly 간격. train.py가 처음 warmup_measure_steps step의 시간을 재서 step 간격으로 바꾼다"
-          required: [interval_seconds, estimated_save_seconds, mtbf_seconds, warmup_measure_steps]
+          description: "every_steps가 0보다 크면 그 step마다 저장(GPU-298, 기본 100). 0이면 Young/Daly 간격: train.py가 처음 warmup_measure_steps step의 시간을 재서 step 간격으로 바꾼다"
+          required: [every_steps, interval_seconds, estimated_save_seconds, mtbf_seconds, warmup_measure_steps]
           properties:
+            every_steps: { type: integer, example: 100, description: "고정 저장 간격(step). 0 = Young/Daly 간격 사용" }
             interval_seconds: { type: number, example: 590 }
             estimated_save_seconds: { type: number, example: 8.1 }
             mtbf_seconds: { type: number, example: 21600 }

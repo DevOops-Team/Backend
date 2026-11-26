@@ -274,8 +274,10 @@ type ConfigDataset struct {
 }
 
 // CheckpointPolicy is how often to save (Young/Daly, design §5). train.py turns IntervalSeconds into a
-// step interval after measuring WarmupMeasureSteps steps.
+// step interval after measuring WarmupMeasureSteps steps, unless EverySteps > 0 fixes the step interval
+// (schema 4, GPU-298; the Young/Daly fields are still filled so 0 restores them).
 type CheckpointPolicy struct {
+	EverySteps           int64   `json:"every_steps"`
 	IntervalSeconds      float64 `json:"interval_seconds"`
 	EstimatedSaveSeconds float64 `json:"estimated_save_seconds"`
 	MTBFSeconds          float64 `json:"mtbf_seconds"`
